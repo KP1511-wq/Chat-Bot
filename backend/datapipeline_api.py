@@ -1,6 +1,5 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import sqlite3
@@ -23,14 +22,6 @@ if not os.path.exists(KNOWLEDGE_BASE_FILE):
         json.dump({}, f)
 
 app = FastAPI(title="Dynamic Data Pipeline")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ─── DERIVE TABLE NAME FROM CSV FILENAME ─────────────────────────────────────
 def csv_to_table_name(csv_path: str) -> str:
@@ -72,21 +63,6 @@ def initialize_database():
     print(f"⚠️  '{CSV_FILE}' not found. Place it next to datapipeline_api.py and restart.")
 
 initialize_database()
-
-# ─── CLEAR STALE KNOWLEDGE BASE ──────────────────────────────────────────────
-def clear_stale_kb():
-    if not os.path.exists(KNOWLEDGE_BASE_FILE):
-        return
-    with open(KNOWLEDGE_BASE_FILE, "r") as f:
-        kb = json.load(f)
-    if kb:
-        existing = list(kb.values())[0]
-        if existing.get("source_file") != CSV_FILE:
-            print(f"🗑️  Clearing stale knowledge base (was: {existing.get('source_file')})")
-            with open(KNOWLEDGE_BASE_FILE, "w") as f:
-                json.dump({}, f)
-
-clear_stale_kb()
 
 # ─── AUTO CONTEXT GENERATION (NEW FORMAT) ────────────────────────────────────
 def infer_column_meaning(col_name: str, dtype: str, sample_vals: list) -> str:

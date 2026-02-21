@@ -1,9 +1,3 @@
-"""
-chatbot_agent.py  —  AI agent frontend
-Run:  python chatbot_agent.py   (port 8001)
-Requires datapipeline_api.py running on port 8000 first.
-"""
-
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,17 +21,16 @@ WORKING_DIR         = "pipeline_workspace"
 KNOWLEDGE_BASE_FILE = os.path.join(WORKING_DIR, "final_records.json")
 
 PIPELINE_BASE    = "http://127.0.0.1:8000"
-SEARCH_API_URL   = f"{PIPELINE_BASE}/tools/housing_query"
-STATS_API_URL    = f"{PIPELINE_BASE}/tools/housing_stats"
+SEARCH_API_URL   = f"{PIPELINE_BASE}/tools/data_query"
+STATS_API_URL    = f"{PIPELINE_BASE}/tools/data_stats"
 
 app = FastAPI(title="Agent Interface")
 
-# CORS — allows the frontend (HTML file / different port) to reach this server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allows your Next.js frontend to connect
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],  # This specifically fixes the OPTIONS 405 error
     allow_headers=["*"],
 )
 
