@@ -5,23 +5,96 @@ import ChatMessage, { Message } from "./components/ChatMessage";
 import TypingIndicator from "./components/TypingIndicator";
 import SuggestedQueries from "./components/SuggestedQueries";
 
-const AGENT_URL = "http://127.0.0.1:8001/chat";
+const API_BASE = "http://127.0.0.1:8001";
+const AGENT_URL = `${API_BASE}/chat`;
+const CHAT_HISTORY_KEY = "data-analyst-chat-history";
+
+type DatasetInfo = { csv_file: string; table_name: string; row_count: number } | null;
+
+type SavedChat = {
+  id: string;
+  title: string;
+  messages: Message[];
+  updatedAt: string;
+};
 
 const WELCOME: Message = {
   id:        "welcome",
   role:      "agent",
-  content:   "Hi! I'm your **AI Real Estate Analyst**. I can help you explore the California Housing dataset — find specific properties, compare prices, or generate charts.\n\nTry one of the suggestions below, or ask me anything!",
+  content:   "Hi! I'm your **AI Data Analyst**. I can help you explore your dataset — find records, compare values, or generate charts.\n\nLoad a CSV or Excel file first, then try the suggestions below or ask me anything!",
   timestamp: new Date(),
 };
 
+function loadChatHistory(): SavedChat[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(CHAT_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as SavedChat[];
+    return (parsed || []).map((c) => ({
+      ...c,
+      messages: (c.messages || []).map((m) => ({
+        ...m,
+        timestamp: new Date((m as unknown as { timestamp: string }).timestamp),
+      })),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function saveChatHistory(history: SavedChat[]) {
+  if (typeof window === "undefined") return;
+  try {
+    const toStore = history.map((c) => ({
+      ...c,
+      messages: c.messages.map((m) => ({
+        ...m,
+        timestamp: (m.timestamp instanceof Date ? m.timestamp : new Date(m.timestamp)).toISOString(),
+      })),
+    }));
+    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(toStore));
+  } catch {
+    // ignore
+  }
+}
+
 export default function Page() {
-  const [messages,    setMessages]    = useState<Message[]>([WELCOME]);
-  const [input,       setInput]       = useState("");
-  const [isLoading,   setIsLoading]   = useState(false);
-  const [showWelcome, setShowWelcome] = useState(true);
-  const bottomRef    = useRef<HTMLDivElement>(null);
-  const inputRef     = useRef<HTMLTextAreaElement>(null);
-  const abortRef     = useRef<AbortController | null>(null);
+  const [messages,       setMessages]       = useState<Message[]>([WELCOME]);
+  const [input,          setInput]          = useState("");
+  const [isLoading,      setIsLoading]      = useState(false);
+  const [showWelcome,    setShowWelcome]    = useState(true);
+  const [datasetInfo,    setDatasetInfo]    = useState<DatasetInfo>(null);
+  const [loadPath,       setLoadPath]       = useState("");
+  const [loadError,      setLoadError]      = useState("");
+  const [loadLoading,    setLoadLoading]    = useState(false);
+  const [uploadLoading,  setUploadLoading]  = useState(false);
+  const [chatHistory,    setChatHistory]    = useState<SavedChat[]>([]);
+  const [currentChatId,  setCurrentChatId]  = useState<string | null>(null);
+  const bottomRef        = useRef<HTMLDivElement>(null);
+  const inputRef         = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef     = useRef<HTMLInputElement>(null);
+  const abortRef         = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    setChatHistory(loadChatHistory());
+  }, []);
+
+  const fetchActiveDataset = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/ingest/active`);
+      if (res.ok) {
+        const d = await res.json();
+        setDatasetInfo({ csv_file: d.csv_file, table_name: d.table_name, row_count: d.row_count ?? 0 });
+      }
+    } catch {
+      setDatasetInfo(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchActiveDataset();
+  }, [fetchActiveDataset]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -73,21 +146,42 @@ export default function Page() {
         content:   typeof raw === "string" ? raw : raw,
         timestamp: new Date(),
       };
-      setMessages(prev => [...prev, agentMsg]);
+      const newId = currentChatId ?? crypto.randomUUID();
+      const title = trimmed.slice(0, 40) + (trimmed.length > 40 ? "…" : "");
+      setMessages(prev => {
+        const next = [...prev, agentMsg];
+        setChatHistory((hist) => {
+          const entry: SavedChat = {
+            id: newId,
+            title,
+            messages: next,
+            updatedAt: new Date().toISOString(),
+          };
+          const existing = hist.findIndex((c) => c.id === newId);
+          const nextHist =
+            existing >= 0
+              ? hist.map((c) => (c.id === newId ? entry : c))
+              : [entry, ...hist].slice(0, 50);
+          saveChatHistory(nextHist);
+          return nextHist;
+        });
+        return next;
+      });
+      if (!currentChatId) setCurrentChatId(newId);
 
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") return;
       const errorMsg: Message = {
         id:        crypto.randomUUID(),
         role:      "agent",
-        content:   `Error: Could not reach the agent. Make sure chatbot_agent.py is running on port 8001.`,
+        content:   `Error: Could not reach the backend. Make sure chatbot_agent.py is running on port 8001.`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMsg]);
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading]);
+  }, [isLoading, currentChatId]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -97,8 +191,81 @@ export default function Page() {
   };
 
   const clearChat = () => {
+    const hasContent = messages.length > 1 || (messages.length === 1 && messages[0].role !== "agent");
+    if (hasContent && messages.some((m) => m.role === "user")) {
+      const title =
+        (messages.find((m) => m.role === "user")?.content as string)?.slice(0, 40) + "…" ?? "Chat";
+      const id = currentChatId ?? crypto.randomUUID();
+      setChatHistory((hist) => {
+        const entry: SavedChat = {
+          id,
+          title,
+          messages,
+          updatedAt: new Date().toISOString(),
+        };
+        const exists = hist.some((c) => c.id === id);
+        const next = exists ? hist.map((c) => (c.id === id ? entry : c)) : [entry, ...hist].slice(0, 50);
+        saveChatHistory(next);
+        return next;
+      });
+    }
+    setCurrentChatId(null);
     setMessages([WELCOME]);
     setShowWelcome(true);
+  };
+
+  const loadChat = (chat: SavedChat) => {
+    setCurrentChatId(chat.id);
+    setMessages(chat.messages);
+    setShowWelcome(chat.messages.length <= 1);
+  };
+
+  const handleLoadByPath = async () => {
+    const path = loadPath.trim();
+    if (!path) {
+      setLoadError("Enter a file path (e.g. housing.csv or data/mydata.csv)");
+      return;
+    }
+    setLoadError("");
+    setLoadLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/ingest/generate_context`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv_file: path }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+      await fetchActiveDataset();
+      setLoadPath("");
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Load failed");
+    } finally {
+      setLoadLoading(false);
+    }
+  };
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLoadError("");
+    setUploadLoading(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API_BASE}/ingest/upload`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+      await fetchActiveDataset();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploadLoading(false);
+      e.target.value = "";
+    }
   };
 
   return (
@@ -116,8 +283,8 @@ export default function Page() {
             </svg>
           </div>
           <div>
-            <div className="text-sm font-semibold text-[var(--text-primary)] leading-tight">RE Analyst</div>
-            <div className="text-xs text-[var(--text-muted)]">California Housing</div>
+            <div className="text-sm font-semibold text-[var(--text-primary)] leading-tight">Data Analyst</div>
+            <div className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.csv_file : "Load dataset"}</div>
           </div>
         </div>
 
@@ -137,16 +304,86 @@ export default function Page() {
         {/* Divider */}
         <div className="border-t border-[var(--border-light)] my-2" />
 
+        {/* Load dataset — user provides path or upload (workflow step 1) */}
+        <div className="mb-4">
+          <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider px-1 mb-2">
+            Load dataset
+          </p>
+          <input
+            type="text"
+            value={loadPath}
+            onChange={(e) => { setLoadPath(e.target.value); setLoadError(""); }}
+            onKeyDown={(e) => e.key === "Enter" && handleLoadByPath()}
+            placeholder="e.g. housing.csv or data/file.csv"
+            className="w-full px-2.5 py-2 text-xs rounded-lg border border-[var(--border)] bg-white placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--brand)]"
+          />
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={handleLoadByPath}
+              disabled={loadLoading}
+              className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-[var(--brand)] text-white hover:bg-[var(--brand-dark)] disabled:opacity-50"
+            >
+              {loadLoading ? "Loading…" : "Load path"}
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadLoading}
+              className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-[var(--border-light)] text-[var(--text-primary)] text-center hover:bg-[var(--border)] disabled:opacity-50 cursor-pointer"
+            >
+              {uploadLoading ? "Uploading…" : "Upload file"}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              className="hidden"
+              onChange={handleUpload}
+              disabled={uploadLoading}
+            />
+          </div>
+          {loadError && <p className="mt-1.5 text-xs text-red-600">{loadError}</p>}
+        </div>
+
+        {/* Chat history — retrieve earlier chats */}
+        {chatHistory.length > 0 && (
+          <div className="mb-4 flex flex-col min-h-0">
+            <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider px-1 mb-2">
+              Chat history
+            </p>
+            <div className="flex-1 overflow-y-auto space-y-1 max-h-48">
+              {chatHistory.map((chat) => (
+                <button
+                  key={chat.id}
+                  type="button"
+                  onClick={() => loadChat(chat)}
+                  className={`w-full text-left px-2.5 py-2 rounded-lg text-xs truncate border transition-colors ${
+                    currentChatId === chat.id
+                      ? "bg-[var(--brand-light)] border-[var(--brand)] text-[var(--brand)]"
+                      : "border-transparent hover:bg-[var(--border-light)] text-[var(--text-secondary)]"
+                  }`}
+                  title={chat.title}
+                >
+                  <span className="block truncate font-medium">{chat.title}</span>
+                  <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">
+                    {new Date(chat.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Capabilities */}
         <div className="mt-2">
           <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider px-1 mb-3">
             Capabilities
           </p>
           {[
-            { icon: "🔍", label: "Search properties" },
+            { icon: "🔍", label: "Search records" },
             { icon: "📊", label: "Generate charts" },
-            { icon: "💡", label: "Price analysis" },
-            { icon: "📍", label: "Location filter" },
+            { icon: "💡", label: "Analyze values" },
+            { icon: "📍", label: "Filter data" },
           ].map(item => (
             <div key={item.label}
               className="flex items-center gap-2.5 px-2 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--border-light)] transition-colors">
@@ -156,12 +393,14 @@ export default function Page() {
           ))}
         </div>
 
-        {/* Dataset info */}
+        {/* Dataset info — shows current loaded file from backend */}
         <div className="mt-auto">
           <div className="rounded-xl bg-[var(--brand-light)] border border-[var(--brand)]/20 p-3">
             <p className="text-xs font-semibold text-[var(--brand)] mb-1">Dataset</p>
             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-              California Housing — 20,640 records with location, pricing, and property features.
+              {datasetInfo
+                ? `${datasetInfo.csv_file} — ${datasetInfo.row_count.toLocaleString()} rows loaded. You can ask questions or request charts.`
+                : "Load a CSV or Excel file above to start. Then ask questions or request charts."}
             </p>
           </div>
         </div>
@@ -180,8 +419,8 @@ export default function Page() {
               </svg>
             </div>
             <div>
-              <h1 className="text-sm font-semibold text-[var(--text-primary)]">AI Real Estate Analyst</h1>
-              <p className="text-xs text-[var(--text-muted)]">California Housing Dataset</p>
+              <h1 className="text-sm font-semibold text-[var(--text-primary)]">AI Data Analyst</h1>
+              <p className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.csv_file : "Load a dataset to start"}</p>
             </div>
           </div>
 
@@ -207,10 +446,10 @@ export default function Page() {
                 </svg>
               </div>
               <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-1">
-                California Housing Explorer
+                Data Explorer
               </h2>
               <p className="text-sm text-[var(--text-secondary)] max-w-sm leading-relaxed">
-                Ask me to find properties, compare prices across regions, or generate visualizations from the dataset.
+                Load a CSV or Excel file in the sidebar, then ask me to find records, compare values, or generate charts from your dataset.
               </p>
             </div>
           )}

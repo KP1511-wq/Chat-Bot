@@ -1,14 +1,17 @@
 import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import json
-import os
 import re
 import ast
-import requests
 import traceback
-from typing import Union
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import pandas as pd
+import sqlite3
+import json
+import os
+import uuid
+import datetime
+from typing import Optional, List, Any, Dict, Union
 from langchain_core.messages import HumanMessage, SystemMessage
 
 try:
@@ -16,32 +19,255 @@ try:
 except ImportError:
     model = None
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
-WORKING_DIR         = "pipeline_workspace"
-KNOWLEDGE_BASE_FILE = os.path.join(WORKING_DIR, "final_records.json")
+CSV_FILE = "housing.csv"          # default CSV (used when no user dataset loaded yet)
+DEFAULT_TABLE = "housing"
+UPLOAD_DIR   = "data"             # directory for user-uploaded CSVs
 
-PIPELINE_BASE    = "http://127.0.0.1:8000"
-SEARCH_API_URL   = f"{PIPELINE_BASE}/tools/data_query"
-STATS_API_URL    = f"{PIPELINE_BASE}/tools/data_stats"
+WORKING_DIR           = "pipeline_workspace"
+KNOWLEDGE_BASE_FILE   = os.path.join(WORKING_DIR, "final_records.json")
+ACTIVE_DATASET_FILE   = os.path.join(WORKING_DIR, "active_dataset.json")
 
-app = FastAPI(title="Agent Interface")
+os.makedirs(WORKING_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+if not os.path.exists(KNOWLEDGE_BASE_FILE):
+    with open(KNOWLEDGE_BASE_FILE, "w") as f:
+        json.dump({}, f)
+
+
+# ─── DERIVE TABLE NAME FROM CSV FILENAME ─────────────────────────────────────
+def csv_to_table_name(csv_path: str) -> str:
+    """housing.csv → housing   |   my sales data.csv → my_sales_data"""
+    base = os.path.splitext(os.path.basename(csv_path))[0]
+    return base.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def get_active_dataset() -> dict:
+    """Current dataset (user-provided or default). Keys: csv_file, table_name, db_file."""
+    if os.path.exists(ACTIVE_DATASET_FILE):
+        try:
+            with open(ACTIVE_DATASET_FILE, "r") as f:
+                d = json.load(f)
+                if d.get("csv_file") and os.path.exists(d["csv_file"]):
+                    return d
+        except Exception:
+            pass
+    # Default
+    base = os.path.splitext(os.path.basename(CSV_FILE))[0].strip().lower().replace(" ", "_").replace("-", "_")
+    return {
+        "csv_file":   CSV_FILE,
+        "table_name": base or DEFAULT_TABLE,
+        "db_file":    os.path.join(WORKING_DIR, (base or DEFAULT_TABLE) + ".db"),
+    }
+
+
+def get_current_csv_file() -> str:
+    return get_active_dataset()["csv_file"]
+
+
+def get_current_table_name() -> str:
+    return get_active_dataset()["table_name"]
+
+
+def get_current_db_file() -> str:
+    return get_active_dataset()["db_file"]
+
+
+def set_active_dataset(csv_file: str):
+    """Persist the active dataset so all endpoints use it."""
+    tname = csv_to_table_name(csv_file)
+    db_file = os.path.join(WORKING_DIR, tname + ".db")
+    with open(ACTIVE_DATASET_FILE, "w") as f:
+        json.dump({"csv_file": csv_file, "table_name": tname, "db_file": db_file}, f, indent=2)
+
+
+# Ensure active dataset file exists on first run
+if not os.path.exists(ACTIVE_DATASET_FILE):
+    set_active_dataset(CSV_FILE)
+
+app = FastAPI(title="Dynamic Data Pipeline + Chat Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows your Next.js frontend to connect
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # This specifically fixes the OPTIONS 405 error
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─── MODELS ───────────────────────────────────────────────────────────────────
+# ─── DATABASE INIT ────────────────────────────────────────────────────────────
+def initialize_database():
+    """Load CSV into SQLite for the active dataset. Runs once per dataset."""
+    csv_path = get_current_csv_file()
+    db_file  = get_current_db_file()
+    tname    = get_current_table_name()
+    if os.path.exists(db_file):
+        print(f"✅ Database already exists at {db_file}")
+        return
+    search_paths = [csv_path, os.path.join(UPLOAD_DIR, os.path.basename(csv_path)), os.path.join("data", os.path.basename(csv_path))]
+    for path in search_paths:
+        if os.path.exists(path):
+            try:
+                print(f"📂 Loading {path} …")
+                df = pd.read_csv(path)
+                df.columns = [
+                    c.strip().lower().replace(" ", "_").replace("-", "_").replace("(", "").replace(")", "")
+                    for c in df.columns
+                ]
+                conn = sqlite3.connect(db_file)
+                df.to_sql(tname, conn, if_exists="replace", index=False)
+                conn.close()
+                print(f"✅ Created table '{tname}' with {len(df):,} rows and {len(df.columns)} columns.")
+                return
+            except Exception as e:
+                print(f"❌ Error loading CSV: {e}")
+                return
+    print(f"⚠️  '{csv_path}' not found. Provide a CSV path or upload a file to load data.")
+
+initialize_database()
+
+# ─── AUTO CONTEXT GENERATION (NEW FORMAT) ────────────────────────────────────
+def infer_column_meaning(col_name: str, dtype: str, sample_vals: list) -> str:
+    """
+    Infer what a column represents based on its name and sample values.
+    Returns a human-readable description.
+    """
+    name_lower = col_name.lower()
+    
+    # Common patterns
+    if "price" in name_lower or "cost" in name_lower or "value" in name_lower:
+        return f"The price or monetary value (measured in the dataset's currency unit)"
+    elif "age" in name_lower:
+        return f"The age or time period (in years)"
+    elif "date" in name_lower or "time" in name_lower:
+        return f"A timestamp or date value"
+    elif "id" in name_lower or name_lower.endswith("_id"):
+        return f"A unique identifier for each record"
+    elif "name" in name_lower or "title" in name_lower:
+        return f"A label or name"
+    elif "count" in name_lower or "total" in name_lower or "num" in name_lower:
+        return f"A count or quantity"
+    elif "latitude" in name_lower or "lat" == name_lower:
+        return f"Geographic latitude coordinate (degrees)"
+    elif "longitude" in name_lower or "lon" == name_lower or "lng" == name_lower:
+        return f"Geographic longitude coordinate (degrees)"
+    elif "category" in name_lower or "type" in name_lower or "status" in name_lower:
+        return f"A categorical label or classification"
+    elif "percent" in name_lower or "rate" in name_lower or "ratio" in name_lower:
+        return f"A percentage or rate value"
+    elif dtype == "object" and sample_vals:
+        return f"A categorical field with values like: {', '.join(map(str, sample_vals[:3]))}"
+    else:
+        # Generic description based on type
+        if dtype in ["int64", "float64"]:
+            return f"A numeric measurement or value"
+        else:
+            return f"A text or categorical field"
+
+
+def build_column_descriptions(df: pd.DataFrame, filename: str = None) -> dict:
+    """Build column descriptions. filename defaults to current dataset."""
+    if filename is None:
+        filename = get_current_csv_file()
+    columns = {}
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        sample_vals = df[col].dropna().unique().tolist()[:5]
+        meaning = infer_column_meaning(col, dtype, sample_vals)
+        parts = [meaning]
+        if df[col].dtype in ["int64", "float64"]:
+            parts.append(f"Range: {df[col].min():.2f} to {df[col].max():.2f}")
+            parts.append(f"Average: {df[col].mean():.2f}")
+        nunique = df[col].nunique()
+        if df[col].dtype == "object" or nunique <= 30:
+            unique_vals = df[col].dropna().unique().tolist()[:5]
+            if unique_vals:
+                parts.append(f"Possible values: {', '.join(map(str, unique_vals))}")
+        null_count = df[col].isna().sum()
+        if null_count > 0:
+            parts.append(f"Note: {null_count} missing values")
+        columns[col] = ". ".join(parts) + "."
+    return {"filename": filename, "columns": columns}
+
+
+def _run_auto_generate_context():
+    """Auto-generates knowledge base on startup for the active dataset."""
+    with open(KNOWLEDGE_BASE_FILE, "r") as f:
+        kb = json.load(f)
+    csv_path = get_current_csv_file()
+    db_file  = get_current_db_file()
+    tname    = get_current_table_name()
+    if kb and kb.get("filename") == csv_path:
+        print(f"✅ Knowledge base already populated for '{csv_path}'.")
+        return
+    if kb and kb.get("filename") != csv_path:
+        print(f"🔄 CSV changed ({kb.get('filename')} → {csv_path}). Regenerating context...")
+    if not os.path.exists(db_file):
+        print("⚠️  DB not ready — skipping context generation.")
+        return
+    print("📚 Generating knowledge base context …")
+    try:
+        conn = sqlite3.connect(db_file)
+        df   = pd.read_sql_query(f"SELECT * FROM {tname}", conn)
+        conn.close()
+        context = build_column_descriptions(df, filename=csv_path)
+        with open(KNOWLEDGE_BASE_FILE, "w") as f:
+            json.dump(context, f, indent=2)
+        print(f"✅ Context generated for '{csv_path}' ({len(df.columns)} columns).")
+    except Exception as e:
+        print(f"❌ Context generation failed: {e}")
+
+_run_auto_generate_context()
+
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
+def get_table_meta() -> dict:
+    """Return the knowledge base record for the current table."""
+    with open(KNOWLEDGE_BASE_FILE, "r") as f:
+        return json.load(f)
+
+
+def validate_column(col: str) -> bool:
+    """Reject column names not in the schema to prevent SQL injection."""
+    meta = get_table_meta()
+    return col in meta.get("columns", {}).keys()
+
+
+# ─── PYDANTIC MODELS ─────────────────────────────────────────────────────────
+class DbIngestRequest(BaseModel):
+    csv_file:   str = CSV_FILE
+    table_name: str = DEFAULT_TABLE
+
+class DataQueryRequest(BaseModel):
+    """
+    Fully dynamic query — the agent passes column names it learned from context.
+    filters: [{"column": "ocean_proximity", "op": "=",  "value": "INLAND"},
+              {"column": "price",           "op": ">=", "value": 100000}]
+    """
+    filters:    Optional[List[Dict[str, Any]]] = None
+    sort_by:    Optional[str]  = None
+    sort_order: Optional[str]  = "ASC"
+    limit:      Optional[int]  = 5
+    columns:    Optional[List[str]] = None   # None = SELECT *
+
+class DataStatsRequest(BaseModel):
+    """
+    Fully dynamic aggregation — agent passes real column names.
+    filters: same format as DataQueryRequest
+    """
+    group_by:   str
+    target_col: str
+    agg_type:   Optional[str]  = "AVG"
+    filters:    Optional[List[Dict[str, Any]]] = None
+
+
 class ChatRequest(BaseModel):
     message: str
+
 
 class ChatResponse(BaseModel):
     response: Union[dict, str]
 
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+# ─── CHAT AGENT HELPERS ──────────────────────────────────────────────────────
 def get_context_summary() -> str:
     if not os.path.exists(KNOWLEDGE_BASE_FILE):
         return "No data loaded yet."
@@ -50,10 +276,7 @@ def get_context_summary() -> str:
 
 
 def parse_all_tool_calls(text: str) -> list:
-    """
-    Extract ALL JSON tool-call blocks from LLM text using brace-depth tracking.
-    Handles multi-tool responses and ignores surrounding explanation text.
-    """
+    """Extract ALL JSON tool-call blocks from LLM text using brace-depth tracking."""
     text  = re.sub(r"```json\s*|\s*```", "", text)
     calls = []
     i     = 0
@@ -90,7 +313,7 @@ def parse_all_tool_calls(text: str) -> list:
 
 
 def build_vegalite_spec(data_values: list, user_message: str) -> dict:
-    """Build a valid Vega-Lite v5 spec directly in Python — no LLM involved."""
+    """Build a valid Vega-Lite v5 spec directly in Python."""
     msg         = user_message.lower()
     group_field = list(data_values[0].keys())[0]
     base        = {"$schema": "https://vega.github.io/schema/vega-lite/v5.json",
@@ -116,7 +339,6 @@ def build_vegalite_spec(data_values: list, user_message: str) -> dict:
                     "x": {"field": group_field, "type": "quantitative"},
                     "y": {"field": "value",     "type": "quantitative"}}}
 
-    # Default → bar chart
     x_type = "quantitative" if any(
         isinstance(d.get(group_field), (int, float)) for d in data_values
     ) else "nominal"
@@ -132,35 +354,242 @@ def build_vegalite_spec(data_values: list, user_message: str) -> dict:
                     {"field": "value", "type": "quantitative", "format": ",.0f"}]}}
 
 
-def call_pipeline(url: str, payload: dict) -> dict:
-    """Call datapipeline_api with error handling."""
-    try:
-        res = requests.post(url, json=payload, timeout=10)
-        return res.json()
-    except requests.exceptions.ConnectionError:
-        raise RuntimeError(
-            "Cannot reach datapipeline_api. "
-            "Make sure datapipeline_api.py is running on port 8000."
-        )
+def housing_params_to_query_filters(params: dict) -> List[Dict[str, Any]]:
+    """Convert housing_query params (ocean_proximity, min_price, etc.) to DataQueryRequest filters."""
+    filters = []
+    if params.get("ocean_proximity") and validate_column("ocean_proximity"):
+        filters.append({"column": "ocean_proximity", "op": "=", "value": params["ocean_proximity"]})
+    if params.get("min_price") is not None and validate_column("median_house_value"):
+        filters.append({"column": "median_house_value", "op": ">=", "value": float(params["min_price"])})
+    if params.get("max_price") is not None and validate_column("median_house_value"):
+        filters.append({"column": "median_house_value", "op": "<=", "value": float(params["max_price"])})
+    if params.get("min_bedrooms") is not None and validate_column("total_bedrooms"):
+        filters.append({"column": "total_bedrooms", "op": ">=", "value": float(params["min_bedrooms"])})
+    if params.get("max_bedrooms") is not None and validate_column("total_bedrooms"):
+        filters.append({"column": "total_bedrooms", "op": "<=", "value": float(params["max_bedrooms"])})
+    return filters if filters else None
 
 
-# ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
+def housing_params_to_stats_filters(params: dict) -> List[Dict[str, Any]]:
+    """Convert housing_stats filter_* params to DataStatsRequest filters."""
+    filters = []
+    if params.get("filter_min_price") is not None and validate_column("median_house_value"):
+        filters.append({"column": "median_house_value", "op": ">=", "value": float(params["filter_min_price"])})
+    if params.get("filter_max_price") is not None and validate_column("median_house_value"):
+        filters.append({"column": "median_house_value", "op": "<=", "value": float(params["filter_max_price"])})
+    if params.get("filter_ocean_proximity") and validate_column("ocean_proximity"):
+        filters.append({"column": "ocean_proximity", "op": "=", "value": params["filter_ocean_proximity"]})
+    return filters if filters else None
+
+
+# ─── SAFE SQL BUILDER ────────────────────────────────────────────────────────
+ALLOWED_OPS = {"=", "!=", ">", ">=", "<", "<=", "LIKE", "IN"}
+
+def build_where(filters: Optional[List[Dict[str, Any]]]):
+    """
+    Build parameterised WHERE clause from a list of filter dicts.
+    Returns (where_str, args_list).
+    """
+    if not filters:
+        return "1=1", []
+
+    clauses, args = [], []
+    for f in filters:
+        col = f.get("column", "")
+        op  = str(f.get("op", "=")).upper()
+        val = f.get("value")
+
+        if not validate_column(col):
+            continue          # silently skip unknown columns
+        if op not in ALLOWED_OPS:
+            continue
+
+        clauses.append(f"{col} {op} ?")
+        args.append(val)
+
+    return (" AND ".join(clauses) if clauses else "1=1"), args
+
+
+# ─── ENDPOINTS ───────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    pipeline_ok = False
-    try:
-        r = requests.get(f"{PIPELINE_BASE}/health", timeout=2)
-        pipeline_ok = r.status_code == 200
-    except Exception:
-        pass
     return {
-        "agent":    "online",
-        "model":    "loaded" if model else "MISSING — check config.py",
-        "pipeline": "online" if pipeline_ok else "OFFLINE — start datapipeline_api.py on port 8000",
+        "status":     "online",
+        "table":      get_current_table_name(),
+        "csv_source": get_current_csv_file(),
+        "database":   "connected" if os.path.exists(get_current_db_file()) else "missing",
+        "agent":      "online",
+        "model":      "loaded" if model else "MISSING — check config.py",
     }
 
 
-# ─── CHAT ENDPOINT ────────────────────────────────────────────────────────────
+@app.get("/schema")
+async def get_schema():
+    """Return full schema + column metadata for the active table."""
+    try:
+        meta = get_table_meta()
+        return {
+            "filename": meta.get("filename"),
+            "columns":  list(meta.get("columns", {}).keys()),
+            "column_descriptions": meta.get("columns", {}),
+        }
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+def _do_ingest(csv_path: str) -> dict:
+    """Load CSV/Excel, build DB and context, set as active dataset. Returns summary dict."""
+    ext = os.path.splitext(csv_path)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(csv_path)
+    else:
+        df = pd.read_csv(csv_path)
+    df.columns = [
+        c.strip().lower().replace(" ", "_").replace("-", "_").replace("(", "").replace(")", "")
+        for c in df.columns
+    ]
+    tname   = csv_to_table_name(csv_path)
+    db_file = os.path.join(WORKING_DIR, tname + ".db")
+    conn = sqlite3.connect(db_file)
+    df.to_sql(tname, conn, if_exists="replace", index=False)
+    conn.close()
+    context = build_column_descriptions(df, filename=csv_path)
+    with open(KNOWLEDGE_BASE_FILE, "w") as f:
+        json.dump(context, f, indent=2)
+    set_active_dataset(csv_path)
+    return {"filename": csv_path, "columns": list(df.columns), "rows": len(df)}
+
+
+@app.post("/ingest/generate_context")
+async def ingest_and_analyze(request: DbIngestRequest):
+    """User provides path of CSV/Excel file → data understanding pipeline → JSON stored → info passed to agent."""
+    try:
+        path = request.csv_file.strip()
+        if not os.path.exists(path):
+            # Try relative to common dirs
+            for base in [UPLOAD_DIR, "data", "."]:
+                p = os.path.join(base, os.path.basename(path))
+                if os.path.exists(p):
+                    path = p
+                    break
+            else:
+                raise HTTPException(400, detail=f"File not found: {request.csv_file}")
+        result = _do_ingest(path)
+        return {"status": "Context Generated", **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/ingest/upload")
+async def ingest_upload(file: UploadFile = File(...)):
+    """User uploads a CSV file → saved, then data understanding pipeline runs → JSON stored → info passed to agent."""
+    if not file.filename or not file.filename.lower().endswith((".csv", ".xlsx", ".xls")):
+        raise HTTPException(400, detail="Please upload a CSV or Excel file (.csv, .xlsx, .xls)")
+    safe_name = os.path.basename(file.filename).replace(" ", "_")
+    path = os.path.join(UPLOAD_DIR, safe_name)
+    try:
+        content = await file.read()
+        with open(path, "wb") as f:
+            f.write(content)
+        result = _do_ingest(path)
+        return {"status": "Context Generated", **result}
+    except Exception as e:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        raise HTTPException(500, detail=str(e))
+
+
+@app.get("/ingest/active")
+async def get_active_dataset_info():
+    """Return the currently loaded dataset (for UI)."""
+    d = get_active_dataset()
+    db_file = d["db_file"]
+    tname = d["table_name"]
+    row_count = 0
+    if os.path.exists(db_file):
+        try:
+            conn = sqlite3.connect(db_file)
+            row_count = pd.read_sql_query(f"SELECT COUNT(*) as n FROM {tname}", conn).iloc[0]["n"]
+            conn.close()
+        except Exception:
+            pass
+    return {"csv_file": d["csv_file"], "table_name": tname, "row_count": int(row_count)}
+
+
+@app.post("/tools/data_query")
+async def data_query(request: DataQueryRequest):
+    """
+    Generic row-level query. Fully dynamic — no hardcoded column names.
+    """
+    try:
+        tname    = get_current_table_name()
+        db_file  = get_current_db_file()
+        if request.columns:
+            safe_cols = [c for c in request.columns if validate_column(c)]
+            select = ", ".join(safe_cols) if safe_cols else "*"
+        else:
+            select = "*"
+        where, args = build_where(request.filters)
+        sort_col = request.sort_by
+        if sort_col and not validate_column(sort_col):
+            sort_col = None
+        order    = "DESC" if str(request.sort_order or "ASC").upper() == "DESC" else "ASC"
+        order_clause = f"ORDER BY {sort_col} {order}" if sort_col else ""
+        limit = int(request.limit or 5)
+        query = f"SELECT {select} FROM {tname} WHERE {where} {order_clause} LIMIT {limit}"
+        print(f"[data_query] {query} | args={args}")
+        conn = sqlite3.connect(db_file)
+        df   = pd.read_sql_query(query, conn, params=args)
+        conn.close()
+        return {"result": df.to_dict(orient="records"), "count": len(df)}
+    except Exception as e:
+        print(f"[data_query ERROR] {e}")
+        return {"result": [], "error": str(e)}
+
+
+@app.post("/tools/data_stats")
+async def data_stats(request: DataStatsRequest):
+    """
+    Generic aggregation / stats. Fully dynamic — no hardcoded column names.
+    """
+    try:
+        tname   = get_current_table_name()
+        db_file = get_current_db_file()
+        if not validate_column(request.group_by):
+            return {"result": [], "error": f"Unknown column: {request.group_by}"}
+        if not validate_column(request.target_col):
+            return {"result": [], "error": f"Unknown column: {request.target_col}"}
+        agg_map = {"average": "AVG", "mean": "AVG", "avg": "AVG",
+                   "sum": "SUM", "count": "COUNT", "min": "MIN", "max": "MAX"}
+        sql_agg = agg_map.get(str(request.agg_type or "AVG").lower(), "AVG")
+        where, args = build_where(request.filters)
+        query = (f"SELECT {request.group_by}, {sql_agg}({request.target_col}) as value "
+                 f"FROM {tname} WHERE {where} "
+                 f"GROUP BY {request.group_by} ORDER BY value DESC")
+        print(f"[data_stats] {query} | args={args}")
+        conn = sqlite3.connect(db_file)
+        df   = pd.read_sql_query(query, conn, params=args)
+        conn.close()
+        return {
+            "result": df.to_dict(orient="records"),
+            "count":  len(df),
+            "query_params": {
+                "group_by":   request.group_by,
+                "target_col": request.target_col,
+                "agg_type":   sql_agg,
+            },
+        }
+    except Exception as e:
+        print(f"[data_stats ERROR] {e}")
+        return {"result": [], "error": str(e)}
+
+
+# ─── CHAT ENDPOINT ───────────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     if not model:
@@ -221,7 +650,6 @@ Hello! I can help you explore the California Housing dataset. Try asking me to f
                 HumanMessage(content=request.message)]
 
     try:
-        # Step 1: LLM decides which tool(s) to call
         raw = str(model.invoke(messages).content).strip()
         print(f"[LLM raw] {raw[:400]}")
 
@@ -240,7 +668,13 @@ Hello! I can help you explore the California Housing dataset. Try asking me to f
 
             if tool_name == "housing_query":
                 print(f"[housing_query] {params}")
-                result_data = call_pipeline(SEARCH_API_URL, params)
+                query_req = DataQueryRequest(
+                    filters=housing_params_to_query_filters(params),
+                    sort_by=params.get("sort_by"),
+                    sort_order=params.get("sort_order", "ASC"),
+                    limit=params.get("limit", 5),
+                )
+                result_data = await data_query(query_req)
 
                 summary = model.invoke([HumanMessage(content=f"""
 User asked: "{request.message}"
@@ -255,7 +689,13 @@ Highlight the most relevant facts. No raw JSON in reply.
 
             elif tool_name == "housing_stats":
                 print(f"[housing_stats] {params}")
-                data = call_pipeline(STATS_API_URL, params)
+                stats_req = DataStatsRequest(
+                    group_by=params.get("group_by", "ocean_proximity"),
+                    target_col=params.get("target_col", "median_house_value"),
+                    agg_type=params.get("agg_type", "AVG"),
+                    filters=housing_params_to_stats_filters(params),
+                )
+                data = await data_stats(stats_req)
                 if not data.get("result"):
                     return ChatResponse(response="No data returned from the database.")
                 return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
@@ -265,11 +705,7 @@ Highlight the most relevant facts. No raw JSON in reply.
         stats_calls = [tc for tc in tool_calls if tc.get("tool") == "housing_stats"]
 
         if stats_calls:
-            # Use filter params from query call to scope the stats
-            stats_params = stats_calls[0].get("parameters", {})
-
-            # If stats already has filters embedded, use them directly
-            # Otherwise pull filters from the query call
+            stats_params = dict(stats_calls[0].get("parameters", {}))
             if query_calls and "filter_max_price" not in stats_params and "filter_min_price" not in stats_params:
                 q_params = query_calls[0].get("parameters", {})
                 if q_params.get("max_price") is not None:
@@ -280,13 +716,26 @@ Highlight the most relevant facts. No raw JSON in reply.
                     stats_params["filter_ocean_proximity"] = q_params["ocean_proximity"]
 
             print(f"[multi-tool housing_stats] {stats_params}")
-            data = call_pipeline(STATS_API_URL, stats_params)
+            stats_req = DataStatsRequest(
+                group_by=stats_params.get("group_by", "ocean_proximity"),
+                target_col=stats_params.get("target_col", "median_house_value"),
+                agg_type=stats_params.get("agg_type", "AVG"),
+                filters=housing_params_to_stats_filters(stats_params),
+            )
+            data = await data_stats(stats_req)
             if not data.get("result"):
                 return ChatResponse(response="No data returned for the given filters.")
             return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
 
         # Fallback: run the first query call
-        result_data = call_pipeline(SEARCH_API_URL, query_calls[0].get("parameters", {}))
+        q_params = query_calls[0].get("parameters", {})
+        query_req = DataQueryRequest(
+            filters=housing_params_to_query_filters(q_params),
+            sort_by=q_params.get("sort_by"),
+            sort_order=q_params.get("sort_order", "ASC"),
+            limit=q_params.get("limit", 5),
+        )
+        result_data = await data_query(query_req)
         summary = model.invoke([HumanMessage(content=f"""
 User asked: "{request.message}"
 Results ({result_data.get('count', 0)} rows):
@@ -296,8 +745,6 @@ Summarise clearly. Format prices with $ and commas. No raw JSON.
 """)]).content
         return ChatResponse(response=str(summary))
 
-    except RuntimeError as e:
-        return ChatResponse(response=str(e))
     except Exception as e:
         traceback.print_exc()
         return ChatResponse(response=f"Error: {str(e)}")
