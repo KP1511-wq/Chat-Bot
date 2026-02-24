@@ -15,7 +15,7 @@ if not api_key:
 else:
     print("🚀 Connecting to Google AI...")
     model = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite", 
+        model="gemini-2.5-flash", 
         google_api_key=api_key,
         temperature=0 
     )

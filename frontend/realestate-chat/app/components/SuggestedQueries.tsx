@@ -1,22 +1,47 @@
 "use client";
 
+import { useState, useEffect } from "react";
+
+const API_BASE = "http://127.0.0.1:8001";
+
 interface SuggestedQueriesProps {
   onSelect: (query: string) => void;
+  refreshKey?: number;
 }
 
-const SUGGESTIONS = [
-  { icon: "🏆", text: "Show the 5 most expensive houses" },
-  { icon: "💰", text: "Find the cheapest houses near the ocean" },
-  { icon: "📊", text: "Plot average price by ocean proximity" },
-  { icon: "🏘️", text: "Find houses under $200,000 and plot their age distribution" },
-  { icon: "📈", text: "Show total houses by ocean proximity as a pie chart" },
-  { icon: "🏡", text: "Find the largest houses by total rooms" },
+type Suggestion = { icon: string; text: string };
+
+const FALLBACK_SUGGESTIONS: Suggestion[] = [
+  { icon: "🔍", text: "Show the first 5 records" },
+  { icon: "📊", text: "Plot a chart of the data" },
+  { icon: "💡", text: "What columns are in this dataset?" },
 ];
 
-export default function SuggestedQueries({ onSelect }: SuggestedQueriesProps) {
+export default function SuggestedQueries({ onSelect, refreshKey = 0 }: SuggestedQueriesProps) {
+  const [suggestions, setSuggestions] = useState<Suggestion[]>(FALLBACK_SUGGESTIONS);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchSuggestions() {
+      try {
+        const res = await fetch(`${API_BASE}/schema/suggestions`);
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled && data.suggestions?.length) {
+            setSuggestions(data.suggestions);
+          }
+        }
+      } catch {
+        // keep fallback
+      }
+    }
+    fetchSuggestions();
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
   return (
     <div className="flex flex-wrap gap-2 justify-center">
-      {SUGGESTIONS.map((s) => (
+      {suggestions.map((s) => (
         <button
           key={s.text}
           onClick={() => onSelect(s.text)}

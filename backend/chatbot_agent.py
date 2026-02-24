@@ -132,7 +132,7 @@ def infer_column_meaning(col_name: str, dtype: str, sample_vals: list) -> str:
     Returns a human-readable description.
     """
     name_lower = col_name.lower()
-    
+
     # Common patterns
     if "price" in name_lower or "cost" in name_lower or "value" in name_lower:
         return f"The price or monetary value (measured in the dataset's currency unit)"
@@ -239,8 +239,8 @@ class DbIngestRequest(BaseModel):
 class DataQueryRequest(BaseModel):
     """
     Fully dynamic query — the agent passes column names it learned from context.
-    filters: [{"column": "ocean_proximity", "op": "=",  "value": "INLAND"},
-              {"column": "price",           "op": ">=", "value": 100000}]
+    filters: [{"column": "some_col", "op": "=",  "value": "INLAND"},
+              {"column": "price",    "op": ">=", "value": 100000}]
     """
     filters:    Optional[List[Dict[str, Any]]] = None
     sort_by:    Optional[str]  = None
@@ -354,32 +354,185 @@ def build_vegalite_spec(data_values: list, user_message: str) -> dict:
                     {"field": "value", "type": "quantitative", "format": ",.0f"}]}}
 
 
-def housing_params_to_query_filters(params: dict) -> List[Dict[str, Any]]:
-    """Convert housing_query params (ocean_proximity, min_price, etc.) to DataQueryRequest filters."""
-    filters = []
-    if params.get("ocean_proximity") and validate_column("ocean_proximity"):
-        filters.append({"column": "ocean_proximity", "op": "=", "value": params["ocean_proximity"]})
-    if params.get("min_price") is not None and validate_column("median_house_value"):
-        filters.append({"column": "median_house_value", "op": ">=", "value": float(params["min_price"])})
-    if params.get("max_price") is not None and validate_column("median_house_value"):
-        filters.append({"column": "median_house_value", "op": "<=", "value": float(params["max_price"])})
-    if params.get("min_bedrooms") is not None and validate_column("total_bedrooms"):
-        filters.append({"column": "total_bedrooms", "op": ">=", "value": float(params["min_bedrooms"])})
-    if params.get("max_bedrooms") is not None and validate_column("total_bedrooms"):
-        filters.append({"column": "total_bedrooms", "op": "<=", "value": float(params["max_bedrooms"])})
-    return filters if filters else None
+# ─── DYNAMIC SYSTEM PROMPT BUILDER ───────────────────────────────────────────
+def pretty_dataset_name(raw_path: str) -> str:
+    """Convert a raw file path into a clean, human-readable dataset name.
+    'data/tested.csv' → 'Tested'   |   'data\\Heart_Disease_Prediction.csv' → 'Heart Disease Prediction'
+    """
+    base = os.path.splitext(os.path.basename(raw_path))[0]          # 'Heart_Disease_Prediction'
+    name = base.replace("_", " ").replace("-", " ").strip()          # 'Heart Disease Prediction'
+    return name.title() if name else "Dataset"                       # Title-case
 
 
-def housing_params_to_stats_filters(params: dict) -> List[Dict[str, Any]]:
-    """Convert housing_stats filter_* params to DataStatsRequest filters."""
-    filters = []
-    if params.get("filter_min_price") is not None and validate_column("median_house_value"):
-        filters.append({"column": "median_house_value", "op": ">=", "value": float(params["filter_min_price"])})
-    if params.get("filter_max_price") is not None and validate_column("median_house_value"):
-        filters.append({"column": "median_house_value", "op": "<=", "value": float(params["filter_max_price"])})
-    if params.get("filter_ocean_proximity") and validate_column("ocean_proximity"):
-        filters.append({"column": "ocean_proximity", "op": "=", "value": params["filter_ocean_proximity"]})
-    return filters if filters else None
+def _build_column_list_for_prompt(meta: dict) -> str:
+    """Format column metadata into a concise description for the LLM prompt."""
+    columns = meta.get("columns", {})
+    if not columns:
+        return "No columns available."
+    lines = []
+    for col_name, description in columns.items():
+        lines.append(f"  - {col_name}: {description}")
+    return "\n".join(lines)
+
+
+def _identify_column_types(meta: dict) -> Dict[str, List[str]]:
+    """Classify columns into numeric and categorical for prompt examples."""
+    columns = meta.get("columns", {})
+    numeric_cols = []
+    categorical_cols = []
+    for col_name, desc in columns.items():
+        desc_lower = desc.lower()
+        if any(kw in desc_lower for kw in ["numeric", "range:", "average:", "price", "count", "quantity", "latitude", "longitude", "percentage", "rate"]):
+            numeric_cols.append(col_name)
+        elif any(kw in desc_lower for kw in ["categorical", "possible values:", "label", "classification", "text"]):
+            categorical_cols.append(col_name)
+        else:
+            # Fallback: if it has "Range:" it's numeric
+            if "range:" in desc_lower:
+                numeric_cols.append(col_name)
+            else:
+                categorical_cols.append(col_name)
+    return {"numeric": numeric_cols, "categorical": categorical_cols}
+
+
+def build_dynamic_system_prompt() -> str:
+    """Build a system prompt dynamically from the currently loaded dataset's metadata."""
+    context_summary = get_context_summary()
+    meta = get_table_meta()
+    raw_filename = meta.get("filename", "unknown dataset")
+    dataset_name = pretty_dataset_name(raw_filename)
+    col_types = _identify_column_types(meta)
+    numeric_cols = col_types["numeric"]
+    categorical_cols = col_types["categorical"]
+    all_cols = list(meta.get("columns", {}).keys())
+
+    # Pick example columns for the prompt (use real column names from the dataset)
+    example_numeric = numeric_cols[0] if numeric_cols else (all_cols[0] if all_cols else "value")
+    example_numeric2 = numeric_cols[1] if len(numeric_cols) > 1 else example_numeric
+    example_categorical = categorical_cols[0] if categorical_cols else (all_cols[-1] if all_cols else "category")
+
+    prompt = f"""You are a data analysis agent for the dataset: "{dataset_name}".
+Your ONLY job is to output a JSON tool call — no explanations, no commentary, no markdown.
+
+DATABASE SCHEMA & CONTEXT:
+{context_summary}
+
+AVAILABLE COLUMNS:
+{_build_column_list_for_prompt(meta)}
+
+TOOLS:
+
+data_query — fetch individual records from the dataset
+  Parameters (all optional):
+  filters: list of filter objects, each with "column", "op", and "value"
+    - column: any column name from the schema above
+    - op: "=" | "!=" | ">" | ">=" | "<" | "<=" | "LIKE" | "IN"
+    - value: the filter value (string or number, matching the column type)
+  columns: list of column names to return (omit for all columns)
+  sort_by: column name to sort by
+  sort_order: "ASC" or "DESC"
+  limit: number of rows to return (default 5)
+
+data_stats — aggregated statistics for charts and summaries
+  Parameters:
+  group_by: column name to group by (REQUIRED)
+  target_col: column name to aggregate (REQUIRED)
+  agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX" (default "AVG")
+  filters: same format as data_query filters (optional)
+
+RULES:
+- Output ONLY raw JSON. No text before or after. No explanations.
+- Use ONLY column names that exist in the schema above. Never invent column names.
+- If user asks to FIND, LIST, SHOW, GET, SEARCH → data_query
+- If user asks to PLOT, CHART, GRAPH, VISUALIZE, COMPARE averages/totals → data_stats
+- If user asks BOTH (e.g. "find X and plot Y") → output TWO JSON blocks, one per line
+- For "most expensive", "highest", "top" → sort_order: "DESC"
+- For "cheapest", "lowest", "bottom" → sort_order: "ASC"
+- For greetings or questions unrelated to the data → reply in plain text only (no JSON)
+
+EXAMPLES (using columns from the current dataset):
+
+User: Show me the top 5 records by {example_numeric}
+{{"tool":"data_query","parameters":{{"sort_by":"{example_numeric}","sort_order":"DESC","limit":5}}}}
+
+User: Find records where {example_categorical} equals a specific value
+{{"tool":"data_query","parameters":{{"filters":[{{"column":"{example_categorical}","op":"=","value":"EXAMPLE"}}],"limit":5}}}}
+
+User: Plot average {example_numeric} by {example_categorical}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG"}}}}
+
+User: Show count of records grouped by {example_categorical}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT"}}}}
+
+User: Hello
+Hello! I can help you explore the "{dataset_name}" dataset. Try asking me to find records, compare values, or plot charts!
+"""
+    return prompt
+
+
+# ─── DYNAMIC SUGGESTED QUERIES ───────────────────────────────────────────────
+def generate_suggested_queries() -> List[Dict[str, str]]:
+    """Generate dataset-aware suggested queries based on loaded schema."""
+    try:
+        meta = get_table_meta()
+        columns = meta.get("columns", {})
+        if not columns:
+            return [
+                {"icon": "📂", "text": "Load a dataset first to see suggestions"},
+            ]
+
+        col_types = _identify_column_types(meta)
+        numeric_cols = col_types["numeric"]
+        categorical_cols = col_types["categorical"]
+        all_cols = list(columns.keys())
+        filename = os.path.splitext(os.path.basename(meta.get("filename", "data")))[0]
+
+        suggestions = []
+
+        # 1. Top N by a numeric column
+        if numeric_cols:
+            col = numeric_cols[0]
+            suggestions.append({"icon": "🏆", "text": f"Show the top 5 records by {col}"})
+
+        # 2. Find records with a filter on a categorical column
+        if categorical_cols:
+            col = categorical_cols[0]
+            # Try to get an example value
+            desc = columns.get(col, "")
+            example_val = ""
+            if "Possible values:" in desc:
+                vals_str = desc.split("Possible values:")[1].split(".")[0].strip()
+                first_val = vals_str.split(",")[0].strip()
+                if first_val:
+                    example_val = first_val
+            if example_val:
+                suggestions.append({"icon": "🔍", "text": f"Find records where {col} is {example_val}"})
+            else:
+                suggestions.append({"icon": "🔍", "text": f"Find records filtered by {col}"})
+
+        # 3. Plot average of numeric by categorical
+        if numeric_cols and categorical_cols:
+            suggestions.append({"icon": "📊", "text": f"Plot average {numeric_cols[0]} by {categorical_cols[0]}"})
+
+        # 4. Count by category (pie chart)
+        if categorical_cols:
+            suggestions.append({"icon": "📈", "text": f"Show count of records by {categorical_cols[0]} as a pie chart"})
+
+        # 5. Sort by another numeric column
+        if len(numeric_cols) > 1:
+            suggestions.append({"icon": "📉", "text": f"Show the bottom 5 records by {numeric_cols[1]}"})
+
+        # 6. General explore
+        suggestions.append({"icon": "💡", "text": f"What columns are in this dataset?"})
+
+        return suggestions[:6]
+
+    except Exception as e:
+        print(f"[generate_suggested_queries ERROR] {e}")
+        return [
+            {"icon": "🔍", "text": "Show the first 5 records"},
+            {"icon": "📊", "text": "Plot a chart of the data"},
+        ]
 
 
 # ─── SAFE SQL BUILDER ────────────────────────────────────────────────────────
@@ -435,6 +588,12 @@ async def get_schema():
         }
     except Exception as e:
         raise HTTPException(500, detail=str(e))
+
+
+@app.get("/schema/suggestions")
+async def get_suggestions():
+    """Return dynamic suggested queries based on the currently loaded dataset."""
+    return {"suggestions": generate_suggested_queries()}
 
 
 def _do_ingest(csv_path: str) -> dict:
@@ -518,7 +677,12 @@ async def get_active_dataset_info():
             conn.close()
         except Exception:
             pass
-    return {"csv_file": d["csv_file"], "table_name": tname, "row_count": int(row_count)}
+    return {
+        "csv_file": d["csv_file"],
+        "table_name": tname,
+        "row_count": int(row_count),
+        "display_name": pretty_dataset_name(d["csv_file"]),
+    }
 
 
 @app.post("/tools/data_query")
@@ -595,56 +759,7 @@ async def chat_endpoint(request: ChatRequest):
     if not model:
         return ChatResponse(response="Error: AI model not loaded. Check config.py.")
 
-    system_prompt = f"""You are a data agent for a California Housing dataset. Your ONLY job is to output a JSON tool call — no explanations, no commentary, no markdown.
-
-DATABASE CONTEXT:
-{get_context_summary()}
-
-TOOLS:
-
-housing_query — fetch individual records
-  ocean_proximity: "NEAR OCEAN" | "INLAND" | "<1H OCEAN" | "NEAR BAY" | "ISLAND"
-  min_price, max_price: float (filters on median_house_value)
-  min_bedrooms, max_bedrooms: float (filters on total_bedrooms)
-  sort_by: column name | sort_order: "ASC" or "DESC" | limit: int
-
-housing_stats — aggregated stats for charts
-  group_by: column to group (e.g. "ocean_proximity", "housing_median_age")
-  target_col: column to aggregate (default "median_house_value")
-  agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX"
-  filter_min_price: float (optional - scope stats to houses above this price)
-  filter_max_price: float (optional - scope stats to houses below this price)
-  filter_ocean_proximity: str (optional - scope stats to this location)
-
-RULES:
-- Output ONLY raw JSON. No text before or after. No explanations.
-- If user asks to FIND, LIST, SHOW, GET → housing_query
-- If user asks to PLOT, CHART, GRAPH, VISUALIZE → housing_stats
-- If user asks BOTH (e.g. "find X and plot Y") → output TWO JSON blocks, one per line
-- "under $200,000" / "below $200k"  → max_price: 200000
-- "over $500,000"  / "above $500k"  → min_price: 500000
-- "costliest" / "most expensive"    → sort_order: "DESC"
-- "cheapest"  / "lowest price"      → sort_order: "ASC"
-- For greetings → reply in plain text only (no JSON)
-
-EXAMPLES:
-
-User: Find the 5 most expensive houses
-{{"tool":"housing_query","parameters":{{"sort_by":"median_house_value","sort_order":"DESC","limit":5}}}}
-
-User: Show cheapest inland houses
-{{"tool":"housing_query","parameters":{{"ocean_proximity":"INLAND","sort_by":"median_house_value","sort_order":"ASC","limit":5}}}}
-
-User: Plot average price by ocean proximity
-{{"tool":"housing_stats","parameters":{{"group_by":"ocean_proximity","target_col":"median_house_value","agg_type":"AVG"}}}}
-
-User: Find houses under $200,000 and plot their age distribution
-{{"tool":"housing_query","parameters":{{"max_price":200000,"sort_by":"median_house_value","sort_order":"ASC","limit":5}}}}
-{{"tool":"housing_stats","parameters":{{"group_by":"housing_median_age","agg_type":"COUNT","filter_max_price":200000}}}}
-
-User: Hello
-Hello! I can help you explore the California Housing dataset. Try asking me to find houses, compare prices, or plot charts!
-"""
+    system_prompt = build_dynamic_system_prompt()
 
     messages = [SystemMessage(content=system_prompt),
                 HumanMessage(content=request.message)]
@@ -666,34 +781,40 @@ Hello! I can help you explore the California Housing dataset. Try asking me to f
             tool_name = tc.get("tool")
             params    = tc.get("parameters", {})
 
-            if tool_name == "housing_query":
-                print(f"[housing_query] {params}")
+            if tool_name == "data_query":
+                print(f"[data_query] {params}")
                 query_req = DataQueryRequest(
-                    filters=housing_params_to_query_filters(params),
+                    filters=params.get("filters"),
+                    columns=params.get("columns"),
                     sort_by=params.get("sort_by"),
                     sort_order=params.get("sort_order", "ASC"),
                     limit=params.get("limit", 5),
                 )
                 result_data = await data_query(query_req)
 
+                # Get dataset name for context-aware summary
+                meta = get_table_meta()
+                dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
+
                 summary = model.invoke([HumanMessage(content=f"""
 User asked: "{request.message}"
+Dataset: {dataset_name}
 Results ({result_data.get('count', 0)} rows):
 {json.dumps(result_data.get('result', []), indent=2)}
 
 Summarise clearly and concisely.
-Format prices with $ and commas (e.g. $240,084).
+Format numeric values appropriately (use $ for monetary values, commas for large numbers).
 Highlight the most relevant facts. No raw JSON in reply.
 """)]).content
                 return ChatResponse(response=str(summary))
 
-            elif tool_name == "housing_stats":
-                print(f"[housing_stats] {params}")
+            elif tool_name == "data_stats":
+                print(f"[data_stats] {params}")
                 stats_req = DataStatsRequest(
-                    group_by=params.get("group_by", "ocean_proximity"),
-                    target_col=params.get("target_col", "median_house_value"),
+                    group_by=params.get("group_by"),
+                    target_col=params.get("target_col"),
                     agg_type=params.get("agg_type", "AVG"),
-                    filters=housing_params_to_stats_filters(params),
+                    filters=params.get("filters"),
                 )
                 data = await data_stats(stats_req)
                 if not data.get("result"):
@@ -701,26 +822,24 @@ Highlight the most relevant facts. No raw JSON in reply.
                 return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
 
         # ── MULTI-TOOL CALL (e.g. find + plot) ────────────────────────────
-        query_calls = [tc for tc in tool_calls if tc.get("tool") == "housing_query"]
-        stats_calls = [tc for tc in tool_calls if tc.get("tool") == "housing_stats"]
+        query_calls = [tc for tc in tool_calls if tc.get("tool") == "data_query"]
+        stats_calls = [tc for tc in tool_calls if tc.get("tool") == "data_stats"]
 
         if stats_calls:
             stats_params = dict(stats_calls[0].get("parameters", {}))
-            if query_calls and "filter_max_price" not in stats_params and "filter_min_price" not in stats_params:
-                q_params = query_calls[0].get("parameters", {})
-                if q_params.get("max_price") is not None:
-                    stats_params["filter_max_price"] = q_params["max_price"]
-                if q_params.get("min_price") is not None:
-                    stats_params["filter_min_price"] = q_params["min_price"]
-                if q_params.get("ocean_proximity"):
-                    stats_params["filter_ocean_proximity"] = q_params["ocean_proximity"]
 
-            print(f"[multi-tool housing_stats] {stats_params}")
+            # If query call has filters, merge them into stats call if stats has none
+            if query_calls and not stats_params.get("filters"):
+                q_params = query_calls[0].get("parameters", {})
+                if q_params.get("filters"):
+                    stats_params["filters"] = q_params["filters"]
+
+            print(f"[multi-tool data_stats] {stats_params}")
             stats_req = DataStatsRequest(
-                group_by=stats_params.get("group_by", "ocean_proximity"),
-                target_col=stats_params.get("target_col", "median_house_value"),
+                group_by=stats_params.get("group_by"),
+                target_col=stats_params.get("target_col"),
                 agg_type=stats_params.get("agg_type", "AVG"),
-                filters=housing_params_to_stats_filters(stats_params),
+                filters=stats_params.get("filters"),
             )
             data = await data_stats(stats_req)
             if not data.get("result"):
@@ -730,18 +849,24 @@ Highlight the most relevant facts. No raw JSON in reply.
         # Fallback: run the first query call
         q_params = query_calls[0].get("parameters", {})
         query_req = DataQueryRequest(
-            filters=housing_params_to_query_filters(q_params),
+            filters=q_params.get("filters"),
+            columns=q_params.get("columns"),
             sort_by=q_params.get("sort_by"),
             sort_order=q_params.get("sort_order", "ASC"),
             limit=q_params.get("limit", 5),
         )
         result_data = await data_query(query_req)
+
+        meta = get_table_meta()
+        dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
+
         summary = model.invoke([HumanMessage(content=f"""
 User asked: "{request.message}"
+Dataset: {dataset_name}
 Results ({result_data.get('count', 0)} rows):
 {json.dumps(result_data.get('result', []), indent=2)}
 
-Summarise clearly. Format prices with $ and commas. No raw JSON.
+Summarise clearly. Format numeric values appropriately. No raw JSON.
 """)]).content
         return ChatResponse(response=str(summary))
 

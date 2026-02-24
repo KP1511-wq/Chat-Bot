@@ -9,7 +9,7 @@ const API_BASE = "http://127.0.0.1:8001";
 const AGENT_URL = `${API_BASE}/chat`;
 const CHAT_HISTORY_KEY = "data-analyst-chat-history";
 
-type DatasetInfo = { csv_file: string; table_name: string; row_count: number } | null;
+type DatasetInfo = { csv_file: string; table_name: string; row_count: number; display_name: string } | null;
 
 type SavedChat = {
   id: string;
@@ -19,9 +19,9 @@ type SavedChat = {
 };
 
 const WELCOME: Message = {
-  id:        "welcome",
-  role:      "agent",
-  content:   "Hi! I'm your **AI Data Analyst**. I can help you explore your dataset — find records, compare values, or generate charts.\n\nLoad a CSV or Excel file first, then try the suggestions below or ask me anything!",
+  id: "welcome",
+  role: "agent",
+  content: "Hi! I'm your **AI Data Analyst**. I can help you explore your dataset — find records, compare values, or generate charts.\n\nLoad a CSV or Excel file first, then try the suggestions below or ask me anything!",
   timestamp: new Date(),
 };
 
@@ -60,21 +60,22 @@ function saveChatHistory(history: SavedChat[]) {
 }
 
 export default function Page() {
-  const [messages,       setMessages]       = useState<Message[]>([WELCOME]);
-  const [input,          setInput]          = useState("");
-  const [isLoading,      setIsLoading]      = useState(false);
-  const [showWelcome,    setShowWelcome]    = useState(true);
-  const [datasetInfo,    setDatasetInfo]    = useState<DatasetInfo>(null);
-  const [loadPath,       setLoadPath]       = useState("");
-  const [loadError,      setLoadError]      = useState("");
-  const [loadLoading,    setLoadLoading]    = useState(false);
-  const [uploadLoading,  setUploadLoading]  = useState(false);
-  const [chatHistory,    setChatHistory]    = useState<SavedChat[]>([]);
-  const [currentChatId,  setCurrentChatId]  = useState<string | null>(null);
-  const bottomRef        = useRef<HTMLDivElement>(null);
-  const inputRef         = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef     = useRef<HTMLInputElement>(null);
-  const abortRef         = useRef<AbortController | null>(null);
+  const [messages, setMessages] = useState<Message[]>([WELCOME]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo>(null);
+  const [loadPath, setLoadPath] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [loadLoading, setLoadLoading] = useState(false);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [chatHistory, setChatHistory] = useState<SavedChat[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [datasetKey, setDatasetKey] = useState(0);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     setChatHistory(loadChatHistory());
@@ -85,7 +86,7 @@ export default function Page() {
       const res = await fetch(`${API_BASE}/ingest/active`);
       if (res.ok) {
         const d = await res.json();
-        setDatasetInfo({ csv_file: d.csv_file, table_name: d.table_name, row_count: d.row_count ?? 0 });
+        setDatasetInfo({ csv_file: d.csv_file, table_name: d.table_name, row_count: d.row_count ?? 0, display_name: d.display_name ?? d.csv_file });
       }
     } catch {
       setDatasetInfo(null);
@@ -117,9 +118,9 @@ export default function Page() {
     if (inputRef.current) inputRef.current.style.height = "auto";
 
     const userMsg: Message = {
-      id:        crypto.randomUUID(),
-      role:      "user",
-      content:   trimmed,
+      id: crypto.randomUUID(),
+      role: "user",
+      content: trimmed,
       timestamp: new Date(),
     };
     setMessages(prev => [...prev, userMsg]);
@@ -129,21 +130,21 @@ export default function Page() {
 
     try {
       const res = await fetch(AGENT_URL, {
-        method:  "POST",
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ message: trimmed }),
-        signal:  abortRef.current.signal,
+        body: JSON.stringify({ message: trimmed }),
+        signal: abortRef.current.signal,
       });
 
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
 
       const data = await res.json();
-      const raw  = data.response;
+      const raw = data.response;
 
       const agentMsg: Message = {
-        id:        crypto.randomUUID(),
-        role:      "agent",
-        content:   typeof raw === "string" ? raw : raw,
+        id: crypto.randomUUID(),
+        role: "agent",
+        content: typeof raw === "string" ? raw : raw,
         timestamp: new Date(),
       };
       const newId = currentChatId ?? crypto.randomUUID();
@@ -172,9 +173,9 @@ export default function Page() {
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") return;
       const errorMsg: Message = {
-        id:        crypto.randomUUID(),
-        role:      "agent",
-        content:   `Error: Could not reach the backend. Make sure chatbot_agent.py is running on port 8001.`,
+        id: crypto.randomUUID(),
+        role: "agent",
+        content: `Error: Could not reach the backend. Make sure chatbot_agent.py is running on port 8001.`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMsg]);
@@ -193,8 +194,8 @@ export default function Page() {
   const clearChat = () => {
     const hasContent = messages.length > 1 || (messages.length === 1 && messages[0].role !== "agent");
     if (hasContent && messages.some((m) => m.role === "user")) {
-      const title =
-        (messages.find((m) => m.role === "user")?.content as string)?.slice(0, 40) + "…" ?? "Chat";
+      const firstUserContent = messages.find((m) => m.role === "user")?.content as string | undefined;
+      const title = firstUserContent ? firstUserContent.slice(0, 40) + "…" : "Chat";
       const id = currentChatId ?? crypto.randomUUID();
       setChatHistory((hist) => {
         const entry: SavedChat = {
@@ -237,6 +238,7 @@ export default function Page() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
       await fetchActiveDataset();
+      setDatasetKey(k => k + 1);
       setLoadPath("");
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Load failed");
@@ -260,6 +262,7 @@ export default function Page() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
       await fetchActiveDataset();
+      setDatasetKey(k => k + 1);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -278,13 +281,13 @@ export default function Page() {
         <div className="flex items-center gap-2.5 mb-8 px-1">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="white" strokeWidth="2" fill="none"/>
-              <polyline points="9 22 9 12 15 12 15 22" stroke="white" strokeWidth="2"/>
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="white" strokeWidth="2" fill="none" />
+              <polyline points="9 22 9 12 15 12 15 22" stroke="white" strokeWidth="2" />
             </svg>
           </div>
           <div>
             <div className="text-sm font-semibold text-[var(--text-primary)] leading-tight">Data Analyst</div>
-            <div className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.csv_file : "Load dataset"}</div>
+            <div className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.display_name : "Load dataset"}</div>
           </div>
         </div>
 
@@ -296,7 +299,7 @@ export default function Page() {
                      transition-colors duration-150 shadow-sm mb-4"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
+            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
           </svg>
           New Chat
         </button>
@@ -357,11 +360,10 @@ export default function Page() {
                   key={chat.id}
                   type="button"
                   onClick={() => loadChat(chat)}
-                  className={`w-full text-left px-2.5 py-2 rounded-lg text-xs truncate border transition-colors ${
-                    currentChatId === chat.id
-                      ? "bg-[var(--brand-light)] border-[var(--brand)] text-[var(--brand)]"
-                      : "border-transparent hover:bg-[var(--border-light)] text-[var(--text-secondary)]"
-                  }`}
+                  className={`w-full text-left px-2.5 py-2 rounded-lg text-xs truncate border transition-colors ${currentChatId === chat.id
+                    ? "bg-[var(--brand-light)] border-[var(--brand)] text-[var(--brand)]"
+                    : "border-transparent hover:bg-[var(--border-light)] text-[var(--text-secondary)]"
+                    }`}
                   title={chat.title}
                 >
                   <span className="block truncate font-medium">{chat.title}</span>
@@ -399,7 +401,7 @@ export default function Page() {
             <p className="text-xs font-semibold text-[var(--brand)] mb-1">Dataset</p>
             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
               {datasetInfo
-                ? `${datasetInfo.csv_file} — ${datasetInfo.row_count.toLocaleString()} rows loaded. You can ask questions or request charts.`
+                ? `${datasetInfo.display_name} — ${datasetInfo.row_count.toLocaleString()} rows loaded. You can ask questions or request charts.`
                 : "Load a CSV or Excel file above to start. Then ask questions or request charts."}
             </p>
           </div>
@@ -415,12 +417,12 @@ export default function Page() {
             {/* Mobile logo */}
             <div className="md:hidden w-7 h-7 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="white" strokeWidth="2" fill="none"/>
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="white" strokeWidth="2" fill="none" />
               </svg>
             </div>
             <div>
               <h1 className="text-sm font-semibold text-[var(--text-primary)]">AI Data Analyst</h1>
-              <p className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.csv_file : "Load a dataset to start"}</p>
+              <p className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.display_name : "Load a dataset to start"}</p>
             </div>
           </div>
 
@@ -441,8 +443,8 @@ export default function Page() {
                               flex items-center justify-center shadow-lg mb-4">
                 <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
                   <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
-                    stroke="white" strokeWidth="1.8" fill="none"/>
-                  <polyline points="9 22 9 12 15 12 15 22" stroke="white" strokeWidth="1.8"/>
+                    stroke="white" strokeWidth="1.8" fill="none" />
+                  <polyline points="9 22 9 12 15 12 15 22" stroke="white" strokeWidth="1.8" />
                 </svg>
               </div>
               <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-1">
@@ -466,7 +468,7 @@ export default function Page() {
           {showWelcome && !isLoading && (
             <div className="pt-2">
               <p className="text-xs text-[var(--text-muted)] text-center mb-3">Try asking…</p>
-              <SuggestedQueries onSelect={sendMessage} />
+              <SuggestedQueries onSelect={sendMessage} refreshKey={datasetKey} />
             </div>
           )}
 
@@ -485,7 +487,7 @@ export default function Page() {
                 value={input}
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about properties, prices, charts…"
+                placeholder="Ask about your data — find records, compare values, plot charts…"
                 rows={1}
                 className="flex-1 bg-transparent text-sm text-[var(--text-primary)] resize-none
                            outline-none placeholder:text-[var(--text-muted)] leading-relaxed
@@ -502,13 +504,13 @@ export default function Page() {
               >
                 {isLoading ? (
                   <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none">
-                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.3"/>
-                    <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.3" />
+                    <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
                   </svg>
                 ) : (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                     <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"
-                      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
               </button>
