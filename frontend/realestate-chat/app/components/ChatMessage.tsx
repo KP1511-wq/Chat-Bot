@@ -7,9 +7,9 @@ const VegaChart = dynamic(() => import("./VegaChart"), { ssr: false });
 type MessageRole = "user" | "agent";
 
 export interface Message {
-  id:        string;
-  role:      MessageRole;
-  content:   string | Record<string, unknown>;
+  id: string;
+  role: MessageRole;
+  content: string | Record<string, unknown>;
   timestamp: Date;
 }
 
@@ -47,7 +47,7 @@ function formatText(text: string): React.ReactNode {
 }
 
 export default function ChatMessage({ message }: ChatMessageProps) {
-  const isUser  = message.role === "user";
+  const isUser = message.role === "user";
   const isChart = !isUser && isVegaSpec(message.content);
   const isError = !isUser &&
     typeof message.content === "string" &&
@@ -67,8 +67,8 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                         flex items-center justify-center shadow-sm">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
             <path d="M12 3C7.03 3 3 7.03 3 12s4.03 9 9 9 9-4.03 9-9-4.03-9-9-9z"
-              stroke="white" strokeWidth="1.5" fill="none"/>
-            <path d="M9 9h1.5v6H9zM13.5 9H15v6h-1.5z" fill="white"/>
+              stroke="white" strokeWidth="1.5" fill="none" />
+            <path d="M9 9h1.5v6H9zM13.5 9H15v6h-1.5z" fill="white" />
           </svg>
         </div>
       )}
@@ -98,8 +98,8 @@ export default function ChatMessage({ message }: ChatMessageProps) {
         )}
 
         {/* Timestamp */}
-        <div className={`text-xs text-[var(--text-muted)] mt-1 ${isUser ? "text-right mr-1" : "ml-1"}`}>
-          {message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        <div suppressHydrationWarning className={`text-xs text-[var(--text-muted)] mt-1 ${isUser ? "text-right mr-1" : "ml-1"}`}>
+          {message.timestamp.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}
         </div>
       </div>
     </div>
