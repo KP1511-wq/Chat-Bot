@@ -253,8 +253,8 @@ class DataStatsRequest(BaseModel):
     Fully dynamic aggregation — agent passes real column names.
     filters: same format as DataQueryRequest
     """
-    group_by:   str
-    target_col: str
+    group_by:   Optional[str]  = None
+    target_col: Optional[str]  = None
     agg_type:   Optional[str]  = "AVG"
     filters:    Optional[List[Dict[str, Any]]] = None
 
@@ -724,6 +724,10 @@ async def data_stats(request: DataStatsRequest):
     try:
         tname   = get_current_table_name()
         db_file = get_current_db_file()
+        if not request.group_by:
+            return {"result": [], "error": "group_by column is required"}
+        if not request.target_col:
+            return {"result": [], "error": "target_col column is required"}
         if not validate_column(request.group_by):
             return {"result": [], "error": f"Unknown column: {request.group_by}"}
         if not validate_column(request.target_col):
@@ -810,9 +814,20 @@ Highlight the most relevant facts. No raw JSON in reply.
 
             elif tool_name == "data_stats":
                 print(f"[data_stats] {params}")
+                group_by = params.get("group_by") or None
+                target_col = params.get("target_col") or None
+                if not group_by or not target_col:
+                    # Fallback: try to infer from the dataset metadata
+                    col_types = _identify_column_types(get_table_meta())
+                    if not group_by and col_types["categorical"]:
+                        group_by = col_types["categorical"][0]
+                    if not target_col and col_types["numeric"]:
+                        target_col = col_types["numeric"][0]
+                if not group_by or not target_col:
+                    return ChatResponse(response="Sorry, I couldn't determine which columns to use for the chart. Please specify a group-by column and a target column.")
                 stats_req = DataStatsRequest(
-                    group_by=params.get("group_by"),
-                    target_col=params.get("target_col"),
+                    group_by=group_by,
+                    target_col=target_col,
                     agg_type=params.get("agg_type", "AVG"),
                     filters=params.get("filters"),
                 )
@@ -835,9 +850,19 @@ Highlight the most relevant facts. No raw JSON in reply.
                     stats_params["filters"] = q_params["filters"]
 
             print(f"[multi-tool data_stats] {stats_params}")
+            group_by = stats_params.get("group_by") or None
+            target_col = stats_params.get("target_col") or None
+            if not group_by or not target_col:
+                col_types = _identify_column_types(get_table_meta())
+                if not group_by and col_types["categorical"]:
+                    group_by = col_types["categorical"][0]
+                if not target_col and col_types["numeric"]:
+                    target_col = col_types["numeric"][0]
+            if not group_by or not target_col:
+                return ChatResponse(response="Sorry, I couldn't determine which columns to use for the chart. Please specify a group-by column and a target column.")
             stats_req = DataStatsRequest(
-                group_by=stats_params.get("group_by"),
-                target_col=stats_params.get("target_col"),
+                group_by=group_by,
+                target_col=target_col,
                 agg_type=stats_params.get("agg_type", "AVG"),
                 filters=stats_params.get("filters"),
             )
