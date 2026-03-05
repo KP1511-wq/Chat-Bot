@@ -12,7 +12,7 @@ import os
 import uuid
 import datetime
 from typing import Optional, List, Any, Dict, Union
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 try:
     from config import model
@@ -259,8 +259,13 @@ class DataStatsRequest(BaseModel):
     filters:    Optional[List[Dict[str, Any]]] = None
 
 
+class HistoryMessage(BaseModel):
+    role: str       # "user" or "agent"
+    content: str
+
 class ChatRequest(BaseModel):
     message: str
+    history: Optional[List[HistoryMessage]] = None
 
 
 class ChatResponse(BaseModel):
@@ -596,6 +601,111 @@ async def get_suggestions():
     return {"suggestions": generate_suggested_queries()}
 
 
+class ColumnUpdateRequest(BaseModel):
+    """Update one or more column descriptions."""
+    columns: Dict[str, str]   # {"col_name": "new description", ...}
+
+
+@app.get("/context")
+async def get_context_endpoint():
+    """Return the full generated context/knowledge-base for the active dataset."""
+    try:
+        meta = get_table_meta()
+        columns = meta.get("columns", {})
+        raw_filename = meta.get("filename", "unknown")
+        dataset_name = pretty_dataset_name(raw_filename)
+        col_types = _identify_column_types(meta)
+
+        # Row count
+        row_count = 0
+        db_file = get_current_db_file()
+        tname = get_current_table_name()
+        if os.path.exists(db_file):
+            try:
+                conn = sqlite3.connect(db_file)
+                row_count = int(pd.read_sql_query(
+                    f"SELECT COUNT(*) as n FROM {tname}", conn
+                ).iloc[0]["n"])
+                conn.close()
+            except Exception:
+                pass
+
+        return {
+            "dataset_name": dataset_name,
+            "filename": raw_filename,
+            "row_count": row_count,
+            "total_columns": len(columns),
+            "numeric_columns": col_types["numeric"],
+            "categorical_columns": col_types["categorical"],
+            "column_details": columns,
+        }
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@app.patch("/context/columns")
+async def update_column_descriptions(request: ColumnUpdateRequest):
+    """Update column descriptions in the knowledge base.
+    The user can edit descriptions; the changes are saved to the JSON file
+    and immediately reflected in the chatbot's system prompt."""
+    try:
+        with open(KNOWLEDGE_BASE_FILE, "r") as f:
+            kb = json.load(f)
+
+        existing_cols = kb.get("columns", {})
+        updated = []
+        unknown = []
+
+        for col_name, new_desc in request.columns.items():
+            if col_name in existing_cols:
+                existing_cols[col_name] = new_desc
+                updated.append(col_name)
+            else:
+                unknown.append(col_name)
+
+        kb["columns"] = existing_cols
+
+        with open(KNOWLEDGE_BASE_FILE, "w") as f:
+            json.dump(kb, f, indent=2)
+
+        print(f"[context/columns] Updated: {updated} | Unknown: {unknown}")
+        return {
+            "status": "updated",
+            "updated_columns": updated,
+            "unknown_columns": unknown,
+        }
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@app.post("/context/regenerate")
+async def regenerate_context():
+    """Force-regenerate the auto-detected context for the active dataset.
+    This is useful if the user wants to reset all manual edits back to auto-detected values."""
+    try:
+        csv_path = get_current_csv_file()
+        db_file  = get_current_db_file()
+        tname    = get_current_table_name()
+        if not os.path.exists(db_file):
+            raise HTTPException(400, detail="No database found. Upload data first.")
+        conn = sqlite3.connect(db_file)
+        df   = pd.read_sql_query(f"SELECT * FROM {tname}", conn)
+        conn.close()
+        context = build_column_descriptions(df, filename=csv_path)
+        with open(KNOWLEDGE_BASE_FILE, "w") as f:
+            json.dump(context, f, indent=2)
+        return {
+            "status": "regenerated",
+            "filename": csv_path,
+            "columns": len(context.get("columns", {})),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+
 def _do_ingest(csv_path: str) -> dict:
     """Load CSV/Excel, build DB and context, set as active dataset. Returns summary dict."""
     ext = os.path.splitext(csv_path)[1].lower()
@@ -765,8 +875,15 @@ async def chat_endpoint(request: ChatRequest):
 
     system_prompt = build_dynamic_system_prompt()
 
-    messages = [SystemMessage(content=system_prompt),
-                HumanMessage(content=request.message)]
+    # Build messages list with conversation history for context
+    messages = [SystemMessage(content=system_prompt)]
+    if request.history:
+        for h in request.history:
+            if h.role == "user":
+                messages.append(HumanMessage(content=h.content))
+            else:
+                messages.append(AIMessage(content=h.content))
+    messages.append(HumanMessage(content=request.message))
 
     try:
         raw = str(model.invoke(messages).content).strip()

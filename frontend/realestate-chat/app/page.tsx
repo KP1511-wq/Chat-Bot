@@ -10,6 +10,15 @@ const AGENT_URL = `${API_BASE}/chat`;
 const CHAT_HISTORY_KEY = "data-analyst-chat-history";
 
 type DatasetInfo = { csv_file: string; table_name: string; row_count: number; display_name: string } | null;
+type ContextData = {
+  dataset_name: string;
+  filename: string;
+  row_count: number;
+  total_columns: number;
+  numeric_columns: string[];
+  categorical_columns: string[];
+  column_details: Record<string, string>;
+} | null;
 
 type SavedChat = {
   id: string;
@@ -72,6 +81,11 @@ export default function Page() {
   const [chatHistory, setChatHistory] = useState<SavedChat[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [datasetKey, setDatasetKey] = useState(0);
+  const [contextData, setContextData] = useState<ContextData>(null);
+  const [editedCols, setEditedCols] = useState<Record<string, string>>({});
+  const [editingCol, setEditingCol] = useState<string | null>(null);
+  const [savingContext, setSavingContext] = useState(false);
+  const [showContext, setShowContext] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -129,10 +143,23 @@ export default function Page() {
     abortRef.current = new AbortController();
 
     try {
+      // Build conversation history for backend context (exclude welcome message)
+      // Chart responses (objects) are replaced with a short placeholder to avoid
+      // sending huge Vega-Lite JSON blobs to the LLM.
+      const history = messages
+        .filter((m) => m.id !== "welcome")
+        .map((m) => ({
+          role: m.role === "user" ? "user" : "agent",
+          content:
+            typeof m.content === "string"
+              ? m.content
+              : "[A chart was generated for this response]",
+        }));
+
       const res = await fetch(AGENT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({ message: trimmed, history }),
         signal: abortRef.current.signal,
       });
 
@@ -221,6 +248,93 @@ export default function Page() {
     setShowWelcome(chat.messages.length <= 1);
   };
 
+  // ── Context helpers ────────────────────────────────────────────
+  const fetchContext = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/context`);
+      if (!res.ok) return;
+      const ctx = await res.json() as NonNullable<ContextData>;
+      if (!ctx) return;
+      setContextData(ctx);
+      setEditedCols({ ...ctx.column_details });
+      setShowContext(true);
+    } catch { /* ignore */ }
+  };
+
+  const showContextMessage = (ctx: ContextData) => {
+    if (!ctx) return;
+    const lines: string[] = [];
+    lines.push(`**Dataset loaded: ${ctx.dataset_name}**`);
+    lines.push(`Source: ${ctx.filename}`);
+    lines.push(`Rows: ${ctx.row_count.toLocaleString()}  ·  Columns: ${ctx.total_columns}`);
+    lines.push(`Numeric: ${ctx.numeric_columns.length}  ·  Categorical: ${ctx.categorical_columns.length}`);
+    lines.push("");
+    lines.push("**Detected columns:**");
+    for (const [col, desc] of Object.entries(ctx.column_details)) {
+      lines.push(`- **${col}**: ${desc}`);
+    }
+    lines.push("");
+    lines.push("Context generated! You can edit column descriptions in the sidebar, or ask me questions about this dataset.");
+    const msg: Message = {
+      id: crypto.randomUUID(),
+      role: "agent",
+      content: lines.join("\n"),
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, msg]);
+    setShowWelcome(false);
+  };
+
+  const saveColumnEdits = async () => {
+    if (!contextData) return;
+    // Find which columns changed
+    const changed: Record<string, string> = {};
+    for (const [col, desc] of Object.entries(editedCols)) {
+      if (desc !== contextData.column_details[col]) {
+        changed[col] = desc;
+      }
+    }
+    if (Object.keys(changed).length === 0) return;
+    setSavingContext(true);
+    try {
+      const res = await fetch(`${API_BASE}/context/columns`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ columns: changed }),
+      });
+      if (res.ok) {
+        // Refresh context to confirm
+        await fetchContext();
+        const updatedMsg: Message = {
+          id: crypto.randomUUID(),
+          role: "agent",
+          content: `Column descriptions updated: **${Object.keys(changed).join(", ")}**. I'll use the new descriptions going forward.`,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, updatedMsg]);
+      }
+    } catch { /* ignore */ }
+    finally { setSavingContext(false); setEditingCol(null); }
+  };
+
+  const handleRegenerate = async () => {
+    setSavingContext(true);
+    try {
+      const res = await fetch(`${API_BASE}/context/regenerate`, { method: "POST" });
+      if (res.ok) {
+        await fetchContext();
+        const regenMsg: Message = {
+          id: crypto.randomUUID(),
+          role: "agent",
+          content: "Column descriptions have been regenerated from the original data.",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, regenMsg]);
+      }
+    } catch { /* ignore */ }
+    finally { setSavingContext(false); }
+  };
+
   const handleLoadByPath = async () => {
     const path = loadPath.trim();
     if (!path) {
@@ -240,6 +354,15 @@ export default function Page() {
       await fetchActiveDataset();
       setDatasetKey(k => k + 1);
       setLoadPath("");
+      // Fetch context and show in chat
+      const ctxRes = await fetch(`${API_BASE}/context`);
+      if (ctxRes.ok) {
+        const ctx = await ctxRes.json();
+        setContextData(ctx);
+        setEditedCols({ ...ctx.column_details });
+        setShowContext(true);
+        showContextMessage(ctx);
+      }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Load failed");
     } finally {
@@ -263,6 +386,15 @@ export default function Page() {
       if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
       await fetchActiveDataset();
       setDatasetKey(k => k + 1);
+      // Fetch context and show in chat
+      const ctxRes = await fetch(`${API_BASE}/context`);
+      if (ctxRes.ok) {
+        const ctx = await ctxRes.json();
+        setContextData(ctx);
+        setEditedCols({ ...ctx.column_details });
+        setShowContext(true);
+        showContextMessage(ctx);
+      }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -347,6 +479,73 @@ export default function Page() {
           </div>
           {loadError && <p className="mt-1.5 text-xs text-red-600">{loadError}</p>}
         </div>
+
+        {/* Column context editor — shown after dataset load */}
+        {showContext && contextData && (
+          <div className="mb-4 flex flex-col min-h-0">
+            <div className="flex items-center justify-between px-1 mb-2">
+              <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">
+                Columns ({contextData.total_columns})
+              </p>
+              <button
+                onClick={() => setShowContext(false)}
+                className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                title="Collapse"
+              >✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-1.5 max-h-44 pr-1">
+              {Object.entries(editedCols).map(([col, desc]) => (
+                <div key={col} className="group">
+                  <p className="text-[11px] font-semibold text-[var(--brand)] px-1">{col}</p>
+                  {editingCol === col ? (
+                    <textarea
+                      className="w-full px-1.5 py-1 text-[11px] rounded border border-[var(--brand)] bg-white
+                                 focus:outline-none resize-none leading-snug"
+                      rows={3}
+                      value={desc}
+                      onChange={(ev) =>
+                        setEditedCols((prev) => ({ ...prev, [col]: ev.target.value }))
+                      }
+                      onBlur={() => setEditingCol(null)}
+                      autoFocus
+                    />
+                  ) : (
+                    <p
+                      className="text-[11px] text-[var(--text-secondary)] px-1 leading-snug cursor-pointer
+                                 hover:bg-[var(--brand-light)] rounded transition-colors"
+                      onClick={() => setEditingCol(col)}
+                      title="Click to edit description"
+                    >
+                      {desc}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-1.5 mt-2">
+              <button
+                onClick={saveColumnEdits}
+                disabled={savingContext}
+                className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-[var(--brand)] text-white
+                           hover:bg-[var(--brand-dark)] disabled:opacity-50"
+              >
+                {savingContext ? "Saving…" : "Save changes"}
+              </button>
+              <button
+                onClick={handleRegenerate}
+                disabled={savingContext}
+                className="px-2 py-1.5 text-xs font-medium rounded-lg bg-[var(--border-light)]
+                           text-[var(--text-primary)] hover:bg-[var(--border)] disabled:opacity-50"
+                title="Reset descriptions to auto-detected values"
+              >
+                ↻ Reset
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Divider */}
+        <div className="border-t border-[var(--border-light)] my-2" />
 
         {/* Chat history — retrieve earlier chats */}
         {chatHistory.length > 0 && (
