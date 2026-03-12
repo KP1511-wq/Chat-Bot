@@ -56,7 +56,7 @@ env/
 pipeline_workspace/
 data/
 datasets/
-presentations_assets/
+presentation_assets/
 *.csv
 *.xlsx
 *.xls
