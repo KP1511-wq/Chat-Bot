@@ -444,12 +444,16 @@ data_stats — aggregated statistics for charts and summaries
   target_col: column name to aggregate (REQUIRED)
   agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX" (default "AVG")
   filters: same format as data_query filters (optional)
+  intent: "chart" or "answer" (REQUIRED)
+    - Use "chart" when user explicitly asks to PLOT, CHART, GRAPH, VISUALIZE, or COMPARE visually
+    - Use "answer" when user asks a QUESTION about aggregated data (e.g. "which is the most", "what has the highest", "name the top category")
 
 RULES:
 - Output ONLY raw JSON. No text before or after. No explanations.
 - Use ONLY column names that exist in the schema above. Never invent column names.
-- If user asks to FIND, LIST, SHOW, GET, SEARCH → data_query
-- If user asks to PLOT, CHART, GRAPH, VISUALIZE, COMPARE averages/totals → data_stats
+- If user asks to FIND, LIST, SHOW, GET, SEARCH specific records → data_query
+- If user asks to PLOT, CHART, GRAPH, VISUALIZE → data_stats with intent "chart"
+- If user asks a QUESTION that requires aggregation (e.g. "what is the most popular", "which category has the highest", "name the most ordered", "what has the lowest") → data_stats with intent "answer"
 - If user asks BOTH (e.g. "find X and plot Y") → output TWO JSON blocks, one per line
 - For "most expensive", "highest", "top" → sort_order: "DESC"
 - For "cheapest", "lowest", "bottom" → sort_order: "ASC"
@@ -464,10 +468,16 @@ User: Find records where {example_categorical} equals a specific value
 {{"tool":"data_query","parameters":{{"filters":[{{"column":"{example_categorical}","op":"=","value":"EXAMPLE"}}],"limit":5}}}}
 
 User: Plot average {example_numeric} by {example_categorical}
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG"}}}}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","intent":"chart"}}}}
 
 User: Show count of records grouped by {example_categorical}
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT"}}}}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","intent":"chart"}}}}
+
+User: What is the most common {example_categorical}?
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_categorical}","agg_type":"COUNT","intent":"answer"}}}}
+
+User: Which {example_categorical} has the highest average {example_numeric}?
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","intent":"answer"}}}}
 
 User: Hello
 Hello! I can help you explore the "{dataset_name}" dataset. Try asking me to find records, compare values, or plot charts!
@@ -931,6 +941,7 @@ Highlight the most relevant facts. No raw JSON in reply.
 
             elif tool_name == "data_stats":
                 print(f"[data_stats] {params}")
+                intent = params.get("intent", "chart")
                 group_by = params.get("group_by") or None
                 target_col = params.get("target_col") or None
                 if not group_by or not target_col:
@@ -941,7 +952,7 @@ Highlight the most relevant facts. No raw JSON in reply.
                     if not target_col and col_types["numeric"]:
                         target_col = col_types["numeric"][0]
                 if not group_by or not target_col:
-                    return ChatResponse(response="Sorry, I couldn't determine which columns to use for the chart. Please specify a group-by column and a target column.")
+                    return ChatResponse(response="Sorry, I couldn't determine which columns to use. Please specify a group-by column and a target column.")
                 stats_req = DataStatsRequest(
                     group_by=group_by,
                     target_col=target_col,
@@ -951,6 +962,24 @@ Highlight the most relevant facts. No raw JSON in reply.
                 data = await data_stats(stats_req)
                 if not data.get("result"):
                     return ChatResponse(response="No data returned from the database.")
+
+                # If the user just wants an answer (not a chart), summarize as text
+                if intent == "answer":
+                    meta = get_table_meta()
+                    dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
+                    summary = model.invoke([HumanMessage(content=f"""
+User asked: "{request.message}"
+Dataset: {dataset_name}
+Aggregated results (group_by={group_by}, agg={params.get('agg_type','AVG')}, target={target_col}):
+{json.dumps(data.get('result', []), indent=2)}
+
+Answer the user's question directly and concisely based on these results.
+Do NOT suggest creating a chart. Just give the answer.
+Format numeric values appropriately (use commas for large numbers, $ for monetary values).
+Highlight the key finding. No raw JSON in reply.
+""")]).content
+                    return ChatResponse(response=str(summary))
+
                 return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
 
         # ── MULTI-TOOL CALL (e.g. find + plot) ────────────────────────────
@@ -959,6 +988,7 @@ Highlight the most relevant facts. No raw JSON in reply.
 
         if stats_calls:
             stats_params = dict(stats_calls[0].get("parameters", {}))
+            intent = stats_params.get("intent", "chart")
 
             # If query call has filters, merge them into stats call if stats has none
             if query_calls and not stats_params.get("filters"):
@@ -976,7 +1006,7 @@ Highlight the most relevant facts. No raw JSON in reply.
                 if not target_col and col_types["numeric"]:
                     target_col = col_types["numeric"][0]
             if not group_by or not target_col:
-                return ChatResponse(response="Sorry, I couldn't determine which columns to use for the chart. Please specify a group-by column and a target column.")
+                return ChatResponse(response="Sorry, I couldn't determine which columns to use. Please specify a group-by column and a target column.")
             stats_req = DataStatsRequest(
                 group_by=group_by,
                 target_col=target_col,
@@ -986,6 +1016,24 @@ Highlight the most relevant facts. No raw JSON in reply.
             data = await data_stats(stats_req)
             if not data.get("result"):
                 return ChatResponse(response="No data returned for the given filters.")
+
+            # If the user just wants an answer (not a chart), summarize as text
+            if intent == "answer":
+                meta = get_table_meta()
+                dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
+                summary = model.invoke([HumanMessage(content=f"""
+User asked: "{request.message}"
+Dataset: {dataset_name}
+Aggregated results (group_by={group_by}, agg={stats_params.get('agg_type','AVG')}, target={target_col}):
+{json.dumps(data.get('result', []), indent=2)}
+
+Answer the user's question directly and concisely based on these results.
+Do NOT suggest creating a chart. Just give the answer.
+Format numeric values appropriately (use commas for large numbers, $ for monetary values).
+Highlight the key finding. No raw JSON in reply.
+""")]).content
+                return ChatResponse(response=str(summary))
+
             return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
 
         # Fallback: run the first query call
