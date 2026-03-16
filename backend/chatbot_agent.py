@@ -253,7 +253,7 @@ class DataStatsRequest(BaseModel):
     Fully dynamic aggregation — agent passes real column names.
     filters: same format as DataQueryRequest
     """
-    group_by:   str
+    group_by:   Optional[str] = None
     target_col: str
     agg_type:   Optional[str]  = "AVG"
     filters:    Optional[List[Dict[str, Any]]] = None
@@ -435,10 +435,11 @@ data_query — fetch individual records from the dataset
 
 data_stats — aggregated statistics for charts and summaries
   Parameters:
-  group_by: column name to group by (REQUIRED)
+  group_by: column name to group by (optional — omit for overall aggregation)
   target_col: column name to aggregate (REQUIRED)
   agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX" (default "AVG")
   filters: same format as data_query filters (optional)
+  format: "chart" or "text" (REQUIRED — use "chart" only when user explicitly asks for a visualization)
 
 RULES:
 - Output ONLY raw JSON. No text before or after. No explanations.
@@ -729,21 +730,28 @@ async def data_query(request: DataQueryRequest):
 async def data_stats(request: DataStatsRequest):
     """
     Generic aggregation / stats. Fully dynamic — no hardcoded column names.
+    Supports optional group_by: when None, computes an overall aggregate.
     """
     try:
         tname   = get_current_table_name()
         db_file = get_current_db_file()
-        if not validate_column(request.group_by):
-            return {"result": [], "error": f"Unknown column: {request.group_by}"}
         if not validate_column(request.target_col):
             return {"result": [], "error": f"Unknown column: {request.target_col}"}
         agg_map = {"average": "AVG", "mean": "AVG", "avg": "AVG",
                    "sum": "SUM", "count": "COUNT", "min": "MIN", "max": "MAX"}
         sql_agg = agg_map.get(str(request.agg_type or "AVG").lower(), "AVG")
         where, args = build_where(request.filters)
-        query = (f"SELECT {request.group_by}, {sql_agg}({request.target_col}) as value "
-                 f"FROM {tname} WHERE {where} "
-                 f"GROUP BY {request.group_by} ORDER BY value DESC")
+
+        if request.group_by and validate_column(request.group_by):
+            # Grouped aggregation
+            query = (f"SELECT {request.group_by}, {sql_agg}({request.target_col}) as value "
+                     f"FROM {tname} WHERE {where} "
+                     f"GROUP BY {request.group_by} ORDER BY value DESC")
+        else:
+            # Overall aggregation (no group_by)
+            query = (f"SELECT {sql_agg}({request.target_col}) as value "
+                     f"FROM {tname} WHERE {where}")
+
         print(f"[data_stats] {query} | args={args}")
         conn = sqlite3.connect(db_file)
         df   = pd.read_sql_query(query, conn, params=args)
@@ -861,6 +869,14 @@ Highlight the most relevant facts. No raw JSON in reply.
 
             elif tool_name == "data_stats":
                 print(f"[data_stats] {params}")
+                # Guard against missing target_col — fall back to plain-text LLM answer
+                if not params.get("target_col"):
+                    fallback = model.invoke([
+                        SystemMessage(content="You are a helpful data assistant. Answer the question based on your general knowledge of the dataset."),
+                        HumanMessage(content=request.message),
+                    ]).content
+                    return ChatResponse(response=str(fallback))
+
                 stats_req = DataStatsRequest(
                     group_by=params.get("group_by"),
                     target_col=params.get("target_col"),
