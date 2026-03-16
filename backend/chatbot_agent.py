@@ -12,7 +12,7 @@ import os
 import uuid
 import datetime
 from typing import Optional, List, Any, Dict, Union
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 try:
     from config import model
@@ -253,19 +253,14 @@ class DataStatsRequest(BaseModel):
     Fully dynamic aggregation — agent passes real column names.
     filters: same format as DataQueryRequest
     """
-    group_by:   Optional[str]  = None
-    target_col: Optional[str]  = None
+    group_by:   str
+    target_col: str
     agg_type:   Optional[str]  = "AVG"
     filters:    Optional[List[Dict[str, Any]]] = None
 
 
-class HistoryMessage(BaseModel):
-    role: str       # "user" or "agent"
-    content: str
-
 class ChatRequest(BaseModel):
     message: str
-    history: Optional[List[HistoryMessage]] = None
 
 
 class ChatResponse(BaseModel):
@@ -444,20 +439,19 @@ data_stats — aggregated statistics for charts and summaries
   target_col: column name to aggregate (REQUIRED)
   agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX" (default "AVG")
   filters: same format as data_query filters (optional)
-  intent: "chart" or "answer" (REQUIRED)
-    - Use "chart" when user explicitly asks to PLOT, CHART, GRAPH, VISUALIZE, or COMPARE visually
-    - Use "answer" when user asks a QUESTION about aggregated data (e.g. "which is the most", "what has the highest", "name the top category")
 
 RULES:
 - Output ONLY raw JSON. No text before or after. No explanations.
 - Use ONLY column names that exist in the schema above. Never invent column names.
-- If user asks to FIND, LIST, SHOW, GET, SEARCH specific records → data_query
-- If user asks to PLOT, CHART, GRAPH, VISUALIZE → data_stats with intent "chart"
-- If user asks a QUESTION that requires aggregation (e.g. "what is the most popular", "which category has the highest", "name the most ordered", "what has the lowest") → data_stats with intent "answer"
+- If user asks to FIND, LIST, SHOW, GET, SEARCH specific rows → data_query
+- If user asks to PLOT, CHART, GRAPH, VISUALIZE → data_stats with "format": "chart"
+- If user asks WHICH, WHAT, WHO is the MOST, LEAST, HIGHEST, LOWEST, TOP, BOTTOM (a descriptive question about an aggregate) → data_stats with "format": "text"
 - If user asks BOTH (e.g. "find X and plot Y") → output TWO JSON blocks, one per line
-- For "most expensive", "highest", "top" → sort_order: "DESC"
+- For "most expensive", "highest", "top" → sort_order: "DESC" (for data_query) or agg_type with ORDER DESC (for data_stats)
 - For "cheapest", "lowest", "bottom" → sort_order: "ASC"
 - For greetings or questions unrelated to the data → reply in plain text only (no JSON)
+- IMPORTANT: Only include "format": "chart" when the user EXPLICITLY asks for a chart, plot, graph, or visualization.
+  If the user asks a QUESTION (e.g. "which X has the most Y?", "what is the top X?"), use "format": "text".
 
 EXAMPLES (using columns from the current dataset):
 
@@ -468,16 +462,16 @@ User: Find records where {example_categorical} equals a specific value
 {{"tool":"data_query","parameters":{{"filters":[{{"column":"{example_categorical}","op":"=","value":"EXAMPLE"}}],"limit":5}}}}
 
 User: Plot average {example_numeric} by {example_categorical}
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","intent":"chart"}}}}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","format":"chart"}}}}
+
+User: Which {example_categorical} has the highest {example_numeric}?
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"SUM","format":"text"}}}}
 
 User: Show count of records grouped by {example_categorical}
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","intent":"chart"}}}}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","format":"chart"}}}}
 
 User: What is the most common {example_categorical}?
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_categorical}","agg_type":"COUNT","intent":"answer"}}}}
-
-User: Which {example_categorical} has the highest average {example_numeric}?
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","intent":"answer"}}}}
+{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","format":"text"}}}}
 
 User: Hello
 Hello! I can help you explore the "{dataset_name}" dataset. Try asking me to find records, compare values, or plot charts!
@@ -611,111 +605,6 @@ async def get_suggestions():
     return {"suggestions": generate_suggested_queries()}
 
 
-class ColumnUpdateRequest(BaseModel):
-    """Update one or more column descriptions."""
-    columns: Dict[str, str]   # {"col_name": "new description", ...}
-
-
-@app.get("/context")
-async def get_context_endpoint():
-    """Return the full generated context/knowledge-base for the active dataset."""
-    try:
-        meta = get_table_meta()
-        columns = meta.get("columns", {})
-        raw_filename = meta.get("filename", "unknown")
-        dataset_name = pretty_dataset_name(raw_filename)
-        col_types = _identify_column_types(meta)
-
-        # Row count
-        row_count = 0
-        db_file = get_current_db_file()
-        tname = get_current_table_name()
-        if os.path.exists(db_file):
-            try:
-                conn = sqlite3.connect(db_file)
-                row_count = int(pd.read_sql_query(
-                    f"SELECT COUNT(*) as n FROM {tname}", conn
-                ).iloc[0]["n"])
-                conn.close()
-            except Exception:
-                pass
-
-        return {
-            "dataset_name": dataset_name,
-            "filename": raw_filename,
-            "row_count": row_count,
-            "total_columns": len(columns),
-            "numeric_columns": col_types["numeric"],
-            "categorical_columns": col_types["categorical"],
-            "column_details": columns,
-        }
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
-
-
-@app.patch("/context/columns")
-async def update_column_descriptions(request: ColumnUpdateRequest):
-    """Update column descriptions in the knowledge base.
-    The user can edit descriptions; the changes are saved to the JSON file
-    and immediately reflected in the chatbot's system prompt."""
-    try:
-        with open(KNOWLEDGE_BASE_FILE, "r") as f:
-            kb = json.load(f)
-
-        existing_cols = kb.get("columns", {})
-        updated = []
-        unknown = []
-
-        for col_name, new_desc in request.columns.items():
-            if col_name in existing_cols:
-                existing_cols[col_name] = new_desc
-                updated.append(col_name)
-            else:
-                unknown.append(col_name)
-
-        kb["columns"] = existing_cols
-
-        with open(KNOWLEDGE_BASE_FILE, "w") as f:
-            json.dump(kb, f, indent=2)
-
-        print(f"[context/columns] Updated: {updated} | Unknown: {unknown}")
-        return {
-            "status": "updated",
-            "updated_columns": updated,
-            "unknown_columns": unknown,
-        }
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
-
-
-@app.post("/context/regenerate")
-async def regenerate_context():
-    """Force-regenerate the auto-detected context for the active dataset.
-    This is useful if the user wants to reset all manual edits back to auto-detected values."""
-    try:
-        csv_path = get_current_csv_file()
-        db_file  = get_current_db_file()
-        tname    = get_current_table_name()
-        if not os.path.exists(db_file):
-            raise HTTPException(400, detail="No database found. Upload data first.")
-        conn = sqlite3.connect(db_file)
-        df   = pd.read_sql_query(f"SELECT * FROM {tname}", conn)
-        conn.close()
-        context = build_column_descriptions(df, filename=csv_path)
-        with open(KNOWLEDGE_BASE_FILE, "w") as f:
-            json.dump(context, f, indent=2)
-        return {
-            "status": "regenerated",
-            "filename": csv_path,
-            "columns": len(context.get("columns", {})),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, detail=str(e))
-
-
-
 def _do_ingest(csv_path: str) -> dict:
     """Load CSV/Excel, build DB and context, set as active dataset. Returns summary dict."""
     ext = os.path.splitext(csv_path)[1].lower()
@@ -844,10 +733,6 @@ async def data_stats(request: DataStatsRequest):
     try:
         tname   = get_current_table_name()
         db_file = get_current_db_file()
-        if not request.group_by:
-            return {"result": [], "error": "group_by column is required"}
-        if not request.target_col:
-            return {"result": [], "error": "target_col column is required"}
         if not validate_column(request.group_by):
             return {"result": [], "error": f"Unknown column: {request.group_by}"}
         if not validate_column(request.target_col):
@@ -877,6 +762,48 @@ async def data_stats(request: DataStatsRequest):
         return {"result": [], "error": str(e)}
 
 
+# ─── CHART vs TEXT INTENT DETECTION ──────────────────────────────────────────
+CHART_KEYWORDS = {"plot", "chart", "graph", "visualize", "visualization",
+                  "draw", "diagram", "pie", "bar chart", "histogram",
+                  "scatter", "line chart", "trend"}
+
+QUESTION_KEYWORDS = {"which", "what", "who", "name", "tell me", "identify",
+                     "how many", "how much", "is the most", "is the least",
+                     "is the highest", "is the lowest", "is the top",
+                     "is the bottom", "ordered the most", "ordered the least",
+                     "has the most", "has the least", "has the highest",
+                     "has the lowest"}
+
+
+def _user_wants_chart(user_message: str, llm_format: str = "chart") -> bool:
+    """Determine whether to return a chart or a text summary.
+
+    Two-layer approach:
+    1. Trust the LLM's ``format`` parameter if it was set.
+    2. As a safety net, also check the user message directly:
+       - If the message contains explicit chart keywords → chart.
+       - If the message is a question about an aggregate → text.
+    """
+    msg = user_message.lower().strip()
+
+    # Layer 1: If the LLM explicitly said "text", honour that
+    if llm_format == "text":
+        return False
+
+    # Layer 2: Even if LLM said "chart", double-check the user message
+    has_chart_kw = any(kw in msg for kw in CHART_KEYWORDS)
+    if has_chart_kw:
+        return True
+
+    # If the user is asking a question (not requesting a chart), prefer text
+    has_question_kw = any(kw in msg for kw in QUESTION_KEYWORDS)
+    if has_question_kw and not has_chart_kw:
+        return False
+
+    # Default: trust the LLM's format parameter
+    return llm_format != "text"
+
+
 # ─── CHAT ENDPOINT ───────────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
@@ -885,15 +812,8 @@ async def chat_endpoint(request: ChatRequest):
 
     system_prompt = build_dynamic_system_prompt()
 
-    # Build messages list with conversation history for context
-    messages = [SystemMessage(content=system_prompt)]
-    if request.history:
-        for h in request.history:
-            if h.role == "user":
-                messages.append(HumanMessage(content=h.content))
-            else:
-                messages.append(AIMessage(content=h.content))
-    messages.append(HumanMessage(content=request.message))
+    messages = [SystemMessage(content=system_prompt),
+                HumanMessage(content=request.message)]
 
     try:
         raw = str(model.invoke(messages).content).strip()
@@ -941,21 +861,9 @@ Highlight the most relevant facts. No raw JSON in reply.
 
             elif tool_name == "data_stats":
                 print(f"[data_stats] {params}")
-                intent = params.get("intent", "chart")
-                group_by = params.get("group_by") or None
-                target_col = params.get("target_col") or None
-                if not group_by or not target_col:
-                    # Fallback: try to infer from the dataset metadata
-                    col_types = _identify_column_types(get_table_meta())
-                    if not group_by and col_types["categorical"]:
-                        group_by = col_types["categorical"][0]
-                    if not target_col and col_types["numeric"]:
-                        target_col = col_types["numeric"][0]
-                if not group_by or not target_col:
-                    return ChatResponse(response="Sorry, I couldn't determine which columns to use. Please specify a group-by column and a target column.")
                 stats_req = DataStatsRequest(
-                    group_by=group_by,
-                    target_col=target_col,
+                    group_by=params.get("group_by"),
+                    target_col=params.get("target_col"),
                     agg_type=params.get("agg_type", "AVG"),
                     filters=params.get("filters"),
                 )
@@ -963,24 +871,27 @@ Highlight the most relevant facts. No raw JSON in reply.
                 if not data.get("result"):
                     return ChatResponse(response="No data returned from the database.")
 
-                # If the user just wants an answer (not a chart), summarize as text
-                if intent == "answer":
+                # Decide: chart or text summary?
+                requested_format = params.get("format", "chart")
+                wants_chart = _user_wants_chart(request.message, requested_format)
+
+                if wants_chart:
+                    return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
+                else:
+                    # Return a descriptive text summary instead of a chart
                     meta = get_table_meta()
                     dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
                     summary = model.invoke([HumanMessage(content=f"""
 User asked: "{request.message}"
 Dataset: {dataset_name}
-Aggregated results (group_by={group_by}, agg={params.get('agg_type','AVG')}, target={target_col}):
+Aggregated results ({data.get('count', 0)} groups):
 {json.dumps(data.get('result', []), indent=2)}
 
-Answer the user's question directly and concisely based on these results.
-Do NOT suggest creating a chart. Just give the answer.
-Format numeric values appropriately (use commas for large numbers, $ for monetary values).
+Summarise clearly and concisely, directly answering the user's question.
+Format numeric values appropriately (use $ for monetary values, commas for large numbers).
 Highlight the key finding. No raw JSON in reply.
 """)]).content
                     return ChatResponse(response=str(summary))
-
-                return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
 
         # ── MULTI-TOOL CALL (e.g. find + plot) ────────────────────────────
         query_calls = [tc for tc in tool_calls if tc.get("tool") == "data_query"]
@@ -988,7 +899,6 @@ Highlight the key finding. No raw JSON in reply.
 
         if stats_calls:
             stats_params = dict(stats_calls[0].get("parameters", {}))
-            intent = stats_params.get("intent", "chart")
 
             # If query call has filters, merge them into stats call if stats has none
             if query_calls and not stats_params.get("filters"):
@@ -997,19 +907,9 @@ Highlight the key finding. No raw JSON in reply.
                     stats_params["filters"] = q_params["filters"]
 
             print(f"[multi-tool data_stats] {stats_params}")
-            group_by = stats_params.get("group_by") or None
-            target_col = stats_params.get("target_col") or None
-            if not group_by or not target_col:
-                col_types = _identify_column_types(get_table_meta())
-                if not group_by and col_types["categorical"]:
-                    group_by = col_types["categorical"][0]
-                if not target_col and col_types["numeric"]:
-                    target_col = col_types["numeric"][0]
-            if not group_by or not target_col:
-                return ChatResponse(response="Sorry, I couldn't determine which columns to use. Please specify a group-by column and a target column.")
             stats_req = DataStatsRequest(
-                group_by=group_by,
-                target_col=target_col,
+                group_by=stats_params.get("group_by"),
+                target_col=stats_params.get("target_col"),
                 agg_type=stats_params.get("agg_type", "AVG"),
                 filters=stats_params.get("filters"),
             )
@@ -1017,24 +917,26 @@ Highlight the key finding. No raw JSON in reply.
             if not data.get("result"):
                 return ChatResponse(response="No data returned for the given filters.")
 
-            # If the user just wants an answer (not a chart), summarize as text
-            if intent == "answer":
+            # Decide: chart or text summary?
+            requested_format = stats_params.get("format", "chart")
+            wants_chart = _user_wants_chart(request.message, requested_format)
+
+            if wants_chart:
+                return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
+            else:
                 meta = get_table_meta()
                 dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
                 summary = model.invoke([HumanMessage(content=f"""
 User asked: "{request.message}"
 Dataset: {dataset_name}
-Aggregated results (group_by={group_by}, agg={stats_params.get('agg_type','AVG')}, target={target_col}):
+Aggregated results ({data.get('count', 0)} groups):
 {json.dumps(data.get('result', []), indent=2)}
 
-Answer the user's question directly and concisely based on these results.
-Do NOT suggest creating a chart. Just give the answer.
-Format numeric values appropriately (use commas for large numbers, $ for monetary values).
+Summarise clearly and concisely, directly answering the user's question.
+Format numeric values appropriately (use $ for monetary values, commas for large numbers).
 Highlight the key finding. No raw JSON in reply.
 """)]).content
                 return ChatResponse(response=str(summary))
-
-            return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
 
         # Fallback: run the first query call
         q_params = query_calls[0].get("parameters", {})
