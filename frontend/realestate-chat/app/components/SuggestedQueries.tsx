@@ -1,57 +1,74 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { BarChart2, Search, Lightbulb, TrendingUp, Filter, Hash } from "lucide-react";
 
 const API_BASE = "http://127.0.0.1:8001";
 
-interface SuggestedQueriesProps {
+type Suggestion = { icon: string; text: string };
+
+const ICON_MAP: Record<string, React.ReactNode> = {
+  "📊": <BarChart2 size={14} />,
+  "🔍": <Search    size={14} />,
+  "💡": <Lightbulb size={14} />,
+  "📈": <TrendingUp size={14} />,
+  "📍": <Filter    size={14} />,
+  "🔢": <Hash      size={14} />,
+};
+
+const FALLBACK: Suggestion[] = [
+  { icon: "🔍", text: "Show the first 5 records" },
+  { icon: "📊", text: "Plot a chart of the data" },
+  { icon: "💡", text: "What columns are in this dataset?" },
+  { icon: "📈", text: "Show top 5 records by value" },
+];
+
+interface Props {
   onSelect: (query: string) => void;
   refreshKey?: number;
 }
 
-type Suggestion = { icon: string; text: string };
-
-const FALLBACK_SUGGESTIONS: Suggestion[] = [
-  { icon: "🔍", text: "Show the first 5 records" },
-  { icon: "📊", text: "Plot a chart of the data" },
-  { icon: "💡", text: "What columns are in this dataset?" },
-];
-
-export default function SuggestedQueries({ onSelect, refreshKey = 0 }: SuggestedQueriesProps) {
-  const [suggestions, setSuggestions] = useState<Suggestion[]>(FALLBACK_SUGGESTIONS);
+export default function SuggestedQueries({ onSelect, refreshKey = 0 }: Props) {
+  const [suggestions, setSuggestions] = useState<Suggestion[]>(FALLBACK);
 
   useEffect(() => {
     let cancelled = false;
-    async function fetchSuggestions() {
-      try {
-        const res = await fetch(`${API_BASE}/schema/suggestions`);
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled && data.suggestions?.length) {
-            setSuggestions(data.suggestions);
-          }
-        }
-      } catch {
-        // keep fallback
-      }
-    }
-    fetchSuggestions();
+    fetch(`${API_BASE}/schema/suggestions`)
+      .then(r => r.json())
+      .then(data => {
+        if (!cancelled && data.suggestions?.length) setSuggestions(data.suggestions);
+      })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [refreshKey]);
 
   return (
-    <div className="flex flex-wrap gap-2 justify-center">
-      {suggestions.map((s) => (
+    <div className="grid grid-cols-2 gap-2.5 w-full max-w-xl">
+      {suggestions.map((s, i) => (
         <button
           key={s.text}
           onClick={() => onSelect(s.text)}
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-white border border-[var(--border)]
-                     text-sm text-[var(--text-secondary)] hover:border-[var(--brand)] hover:text-[var(--brand)]
-                     hover:bg-[var(--brand-light)] transition-all duration-200 shadow-sm hover:shadow-md
-                     whitespace-nowrap"
+          className="glass glass-hover group flex items-start gap-3 p-3.5 rounded-xl text-left transition-all duration-200 card-enter"
+          style={{
+            animationDelay: `${i * 60}ms`,
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+          onMouseEnter={e => {
+            (e.currentTarget as HTMLElement).style.borderColor = "rgba(59,130,246,0.4)";
+            (e.currentTarget as HTMLElement).style.boxShadow  = "0 0 16px rgba(59,130,246,0.12)";
+          }}
+          onMouseLeave={e => {
+            (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.08)";
+            (e.currentTarget as HTMLElement).style.boxShadow  = "none";
+          }}
         >
-          <span>{s.icon}</span>
-          <span>{s.text}</span>
+          <span className="flex-shrink-0 mt-0.5 text-accent"
+            style={{ color: "#3B82F6" }}>
+            {ICON_MAP[s.icon] ?? <Search size={14} />}
+          </span>
+          <span className="text-sm leading-snug" style={{ color: "#94A3B8" }}>
+            {s.text}
+          </span>
         </button>
       ))}
     </div>

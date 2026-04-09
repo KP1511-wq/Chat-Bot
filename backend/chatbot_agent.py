@@ -189,15 +189,45 @@ def build_column_descriptions(df: pd.DataFrame, filename: str = None) -> dict:
     return {"filename": filename, "columns": columns}
 
 
+def _reflect_on_context(context: dict) -> dict:
+    """LLM self-verification step: review and refine auto-generated column descriptions."""
+    if not model:
+        context["verified"] = True
+        return context
+    print("🔎 Running self-verification reflection on generated context...")
+    reflection_prompt = f"""You are a data analysis expert. Review the following auto-generated column descriptions for a dataset.
+For each column, verify the description is accurate given the column name, data type, and sample values.
+Improve any descriptions that are vague, incorrect, or could be more informative.
+
+Return ONLY a valid JSON object with the exact same structure (keep the "filename" field and all column keys).
+Map each column name to its verified/improved description string.
+
+Generated context:
+{json.dumps(context, indent=2)}"""
+    try:
+        raw = model.invoke([HumanMessage(content=reflection_prompt)]).content
+        cleaned = re.sub(r"```json\s*|\s*```", "", raw).strip()
+        verified = json.loads(cleaned)
+        if "columns" in verified:
+            verified["filename"] = context["filename"]
+            verified["verified"] = True
+            print("✅ Context refined by LLM reflection.")
+            return verified
+    except Exception as e:
+        print(f"⚠️  Reflection parse failed ({e}), keeping original context.")
+    context["verified"] = True
+    return context
+
+
 def _run_auto_generate_context():
-    """Auto-generates knowledge base on startup for the active dataset."""
+    """Auto-generates and self-verifies knowledge base on startup for the active dataset."""
     with open(KNOWLEDGE_BASE_FILE, "r") as f:
         kb = json.load(f)
     csv_path = get_current_csv_file()
     db_file  = get_current_db_file()
     tname    = get_current_table_name()
-    if kb and kb.get("filename") == csv_path:
-        print(f"✅ Knowledge base already populated for '{csv_path}'.")
+    if kb and kb.get("filename") == csv_path and kb.get("verified"):
+        print(f"✅ Knowledge base already verified for '{csv_path}'.")
         return
     if kb and kb.get("filename") != csv_path:
         print(f"🔄 CSV changed ({kb.get('filename')} → {csv_path}). Regenerating context...")
@@ -210,6 +240,7 @@ def _run_auto_generate_context():
         df   = pd.read_sql_query(f"SELECT * FROM {tname}", conn)
         conn.close()
         context = build_column_descriptions(df, filename=csv_path)
+        context = _reflect_on_context(context)
         with open(KNOWLEDGE_BASE_FILE, "w") as f:
             json.dump(context, f, indent=2)
         print(f"✅ Context generated for '{csv_path}' ({len(df.columns)} columns).")
@@ -576,13 +607,26 @@ def build_where(filters: Optional[List[Dict[str, Any]]]):
 # ─── ENDPOINTS ───────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
+    d = get_active_dataset()
+    db_file = d["db_file"]
+    tname   = d["table_name"]
+    row_count = 0
+    if os.path.exists(db_file):
+        try:
+            conn = sqlite3.connect(db_file)
+            row_count = int(pd.read_sql_query(f"SELECT COUNT(*) as n FROM {tname}", conn).iloc[0]["n"])
+            conn.close()
+        except Exception:
+            pass
     return {
-        "status":     "online",
-        "table":      get_current_table_name(),
-        "csv_source": get_current_csv_file(),
-        "database":   "connected" if os.path.exists(get_current_db_file()) else "missing",
-        "agent":      "online",
-        "model":      "loaded" if model else "MISSING — check config.py",
+        "status":       "online",
+        "table":        tname,
+        "csv_source":   d["csv_file"],
+        "display_name": pretty_dataset_name(d["csv_file"]),
+        "row_count":    row_count,
+        "database":     "connected" if os.path.exists(db_file) else "missing",
+        "agent":        "online",
+        "model":        "loaded" if model else "MISSING — check config.py",
     }
 
 
@@ -623,6 +667,7 @@ def _do_ingest(csv_path: str) -> dict:
     df.to_sql(tname, conn, if_exists="replace", index=False)
     conn.close()
     context = build_column_descriptions(df, filename=csv_path)
+    context = _reflect_on_context(context)
     with open(KNOWLEDGE_BASE_FILE, "w") as f:
         json.dump(context, f, indent=2)
     set_active_dataset(csv_path)
@@ -672,27 +717,6 @@ async def ingest_upload(file: UploadFile = File(...)):
                 pass
         raise HTTPException(500, detail=str(e))
 
-
-@app.get("/ingest/active")
-async def get_active_dataset_info():
-    """Return the currently loaded dataset (for UI)."""
-    d = get_active_dataset()
-    db_file = d["db_file"]
-    tname = d["table_name"]
-    row_count = 0
-    if os.path.exists(db_file):
-        try:
-            conn = sqlite3.connect(db_file)
-            row_count = pd.read_sql_query(f"SELECT COUNT(*) as n FROM {tname}", conn).iloc[0]["n"]
-            conn.close()
-        except Exception:
-            pass
-    return {
-        "csv_file": d["csv_file"],
-        "table_name": tname,
-        "row_count": int(row_count),
-        "display_name": pretty_dataset_name(d["csv_file"]),
-    }
 
 
 @app.post("/tools/data_query")

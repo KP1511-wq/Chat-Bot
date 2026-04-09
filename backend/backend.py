@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.runnables import RunnableConfig
 
 # Import your LLM and DB Tools
-from config import llm
+from config import model as llm
 from tools_db import execute_read_query, get_columns, get_sample_rows, DB_PATH
 
 # ==========================================

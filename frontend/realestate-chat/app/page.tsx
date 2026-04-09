@@ -1,529 +1,653 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import ChatMessage, { Message } from "./components/ChatMessage";
-import TypingIndicator from "./components/TypingIndicator";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import {
+  Bot, Plus, Upload, FolderOpen, Database,
+  Send, Loader2, PanelLeftClose, PanelLeftOpen, Sparkles,
+  MessageSquare, Circle,
+} from "lucide-react";
+import ChatMessage from "./components/ChatMessage";
 import SuggestedQueries from "./components/SuggestedQueries";
+import TypingIndicator from "./components/TypingIndicator";
+import type { Message } from "./components/ChatMessage";
 
-const API_BASE = "http://127.0.0.1:8001";
+const API_BASE  = "http://127.0.0.1:8001";
 const AGENT_URL = `${API_BASE}/chat`;
-const CHAT_HISTORY_KEY = "data-analyst-chat-history";
 
-type DatasetInfo = { csv_file: string; table_name: string; row_count: number; display_name: string } | null;
-
-type SavedChat = {
+interface ChatSession {
   id: string;
   title: string;
+  timestamp: string;
   messages: Message[];
-  updatedAt: string;
-};
+}
 
-const WELCOME: Message = {
+interface DatasetInfo {
+  csv_file: string;
+  table_name: string;
+  row_count: number;
+  display_name: string;
+}
+
+const WELCOME_MSG: Message = {
   id: "welcome",
   role: "agent",
-  content: "Hi! I'm your **AI Data Analyst**. I can help you explore your dataset — find records, compare values, or generate charts.\n\nLoad a CSV or Excel file first, then try the suggestions below or ask me anything!",
+  content: "Hello! I'm your AI data analyst. Upload a dataset and start asking questions — I can query records, compute statistics, and build charts.",
   timestamp: new Date(),
 };
 
-function loadChatHistory(): SavedChat[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(CHAT_HISTORY_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as SavedChat[];
-    return (parsed || []).map((c) => ({
-      ...c,
-      messages: (c.messages || []).map((m) => ({
-        ...m,
-        timestamp: new Date((m as unknown as { timestamp: string }).timestamp),
-      })),
-    }));
-  } catch {
-    return [];
-  }
+function loadChatHistory(): ChatSession[] {
+  try { return JSON.parse(localStorage.getItem("chatHistory") || "[]"); }
+  catch { return []; }
 }
 
-function saveChatHistory(history: SavedChat[]) {
-  if (typeof window === "undefined") return;
-  try {
-    const toStore = history.map((c) => ({
-      ...c,
-      messages: c.messages.map((m) => ({
-        ...m,
-        timestamp: (m.timestamp instanceof Date ? m.timestamp : new Date(m.timestamp)).toISOString(),
-      })),
-    }));
-    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(toStore));
-  } catch {
-    // ignore
-  }
+function saveChatHistory(sessions: ChatSession[]) {
+  localStorage.setItem("chatHistory", JSON.stringify(sessions.slice(0, 30)));
 }
 
+// ── Sidebar section header ────────────────────────────────────────────────────
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p style={{
+      fontSize: 10, fontWeight: 600, letterSpacing: "0.1em",
+      textTransform: "uppercase", color: "#334155",
+      padding: "0 12px", marginBottom: 4,
+    }}>
+      {children}
+    </p>
+  );
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 export default function Page() {
-  const [messages, setMessages] = useState<Message[]>([WELCOME]);
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [showWelcome, setShowWelcome] = useState(true);
-  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo>(null);
-  const [loadPath, setLoadPath] = useState("");
-  const [loadError, setLoadError] = useState("");
-  const [loadLoading, setLoadLoading] = useState(false);
-  const [uploadLoading, setUploadLoading] = useState(false);
-  const [chatHistory, setChatHistory] = useState<SavedChat[]>([]);
-  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
-  const [datasetKey, setDatasetKey] = useState(0);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const [sidebarOpen,       setSidebarOpen]       = useState(true);
+  const [messages,          setMessages]          = useState<Message[]>([WELCOME_MSG]);
+  const [inputValue,        setInputValue]        = useState("");
+  const [isLoading,         setIsLoading]         = useState(false);
+  const [chatHistory,       setChatHistory]       = useState<ChatSession[]>([]);
+  const [currentChatId,     setCurrentChatId]     = useState<string | null>(null);
+  const [datasetInfo,       setDatasetInfo]       = useState<DatasetInfo | null>(null);
+  const [loadPath,          setLoadPath]          = useState("");
+  const [loadError,         setLoadError]         = useState("");
+  const [isUploadLoading,   setIsUploadLoading]   = useState(false);
+  const [isPathLoading,     setIsPathLoading]     = useState(false);
+  const [suggestRefreshKey, setSuggestRefreshKey] = useState(0);
 
-  useEffect(() => {
-    setChatHistory(loadChatHistory());
-  }, []);
+  const textareaRef    = useRef<HTMLTextAreaElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const uploadRef      = useRef<HTMLInputElement>(null);
+  const abortRef       = useRef<AbortController | null>(null);
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  useEffect(() => { setChatHistory(loadChatHistory()); }, []);
 
   const fetchActiveDataset = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/ingest/active`);
+      const res = await fetch(`${API_BASE}/health`);
       if (res.ok) {
         const d = await res.json();
-        setDatasetInfo({ csv_file: d.csv_file, table_name: d.table_name, row_count: d.row_count ?? 0, display_name: d.display_name ?? d.csv_file });
+        setDatasetInfo({
+          csv_file:     d.csv_source,
+          table_name:   d.table,
+          row_count:    d.row_count ?? 0,
+          display_name: d.display_name ?? d.csv_source,
+        });
       }
-    } catch {
-      setDatasetInfo(null);
-    }
+    } catch { setDatasetInfo(null); }
   }, []);
 
-  useEffect(() => {
-    fetchActiveDataset();
-  }, [fetchActiveDataset]);
+  useEffect(() => { fetchActiveDataset(); }, [fetchActiveDataset]);
 
-  // Auto-scroll to bottom
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  // Auto-resize textarea
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
-    e.target.style.height = "auto";
-    e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
-  };
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
+  }, [inputValue]);
+
+  // ── Handlers ─────────────────────────────────────────────────────────────
+  const startNewChat = useCallback(() => {
+    if (currentChatId && messages.length > 1) {
+      const title   = messages.find(m => m.role === "user")?.content?.toString().slice(0, 46) ?? "Untitled";
+      const updated = [
+        { id: currentChatId, title, timestamp: new Date().toISOString(), messages },
+        ...chatHistory.filter(s => s.id !== currentChatId),
+      ];
+      saveChatHistory(updated);
+      setChatHistory(updated);
+    }
+    setMessages([WELCOME_MSG]);
+    setCurrentChatId(null);
+    setInputValue("");
+  }, [currentChatId, messages, chatHistory]);
+
+  const loadChat = useCallback((session: ChatSession) => {
+    setMessages(session.messages.map(m => ({ ...m, timestamp: new Date(m.timestamp) })));
+    setCurrentChatId(session.id);
+  }, []);
 
   const sendMessage = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || isLoading) return;
 
-    setShowWelcome(false);
-    setInput("");
-    if (inputRef.current) inputRef.current.style.height = "auto";
+    const chatId = currentChatId ?? `chat_${Date.now()}`;
+    if (!currentChatId) setCurrentChatId(chatId);
 
     const userMsg: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: trimmed,
-      timestamp: new Date(),
+      id: `u_${Date.now()}`, role: "user",
+      content: trimmed, timestamp: new Date(),
     };
-    setMessages(prev => [...prev, userMsg]);
+    setMessages(prev => [...prev.filter(m => m.id !== "welcome"), userMsg]);
+    setInputValue("");
     setIsLoading(true);
-
     abortRef.current = new AbortController();
 
     try {
-      const res = await fetch(AGENT_URL, {
-        method: "POST",
+      const res     = await fetch(AGENT_URL, {
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed }),
-        signal: abortRef.current.signal,
+        body:    JSON.stringify({ message: trimmed }),
+        signal:  abortRef.current.signal,
       });
-
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
-
-      const data = await res.json();
-      const raw = data.response;
+      const data    = await res.json();
+      const content = data.response ?? "No response.";
 
       const agentMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "agent",
-        content: typeof raw === "string" ? raw : raw,
-        timestamp: new Date(),
+        id: `a_${Date.now()}`, role: "agent",
+        content, timestamp: new Date(),
+        isError:   typeof content === "string" && content.startsWith("Error:"),
+        userQuery: trimmed,
       };
-      const newId = currentChatId ?? crypto.randomUUID();
-      const title = trimmed.slice(0, 40) + (trimmed.length > 40 ? "…" : "");
-      setMessages(prev => {
-        const next = [...prev, agentMsg];
-        setChatHistory((hist) => {
-          const entry: SavedChat = {
-            id: newId,
-            title,
-            messages: next,
-            updatedAt: new Date().toISOString(),
-          };
-          const existing = hist.findIndex((c) => c.id === newId);
-          const nextHist =
-            existing >= 0
-              ? hist.map((c) => (c.id === newId ? entry : c))
-              : [entry, ...hist].slice(0, 50);
-          saveChatHistory(nextHist);
-          return nextHist;
-        });
-        return next;
-      });
-      if (!currentChatId) setCurrentChatId(newId);
 
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") return;
-      const errorMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "agent",
-        content: `Error: Could not reach the backend. Make sure chatbot_agent.py is running on port 8001.`,
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, errorMsg]);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isLoading, currentChatId]);
+      setMessages(prev => {
+        const updated = [...prev, agentMsg];
+        const title   = trimmed.slice(0, 46);
+        const session: ChatSession = { id: chatId, title, timestamp: new Date().toISOString(), messages: updated };
+        const history = [session, ...chatHistory.filter(s => s.id !== chatId)];
+        saveChatHistory(history);
+        setChatHistory(history);
+        return updated;
+      });
+    } catch (e: unknown) {
+      if ((e as Error).name !== "AbortError") {
+        setMessages(prev => [...prev, {
+          id: `err_${Date.now()}`, role: "agent",
+          content: "Connection error. Is the backend running on port 8001?",
+          timestamp: new Date(), isError: true,
+        }]);
+      }
+    } finally { setIsLoading(false); }
+  }, [isLoading, currentChatId, chatHistory]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage(input);
-    }
-  };
-
-  const clearChat = () => {
-    const hasContent = messages.length > 1 || (messages.length === 1 && messages[0].role !== "agent");
-    if (hasContent && messages.some((m) => m.role === "user")) {
-      const firstUserContent = messages.find((m) => m.role === "user")?.content as string | undefined;
-      const title = firstUserContent ? firstUserContent.slice(0, 40) + "…" : "Chat";
-      const id = currentChatId ?? crypto.randomUUID();
-      setChatHistory((hist) => {
-        const entry: SavedChat = {
-          id,
-          title,
-          messages,
-          updatedAt: new Date().toISOString(),
-        };
-        const exists = hist.some((c) => c.id === id);
-        const next = exists ? hist.map((c) => (c.id === id ? entry : c)) : [entry, ...hist].slice(0, 50);
-        saveChatHistory(next);
-        return next;
-      });
-    }
-    setCurrentChatId(null);
-    setMessages([WELCOME]);
-    setShowWelcome(true);
-  };
-
-  const loadChat = (chat: SavedChat) => {
-    setCurrentChatId(chat.id);
-    setMessages(chat.messages);
-    setShowWelcome(chat.messages.length <= 1);
-  };
-
-  const handleLoadByPath = async () => {
-    const path = loadPath.trim();
-    if (!path) {
-      setLoadError("Enter a file path (e.g. housing.csv or data/mydata.csv)");
-      return;
-    }
-    setLoadError("");
-    setLoadLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/ingest/generate_context`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ csv_file: path }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
-      await fetchActiveDataset();
-      setDatasetKey(k => k + 1);
-      setLoadPath("");
-    } catch (e) {
-      setLoadError(e instanceof Error ? e.message : "Load failed");
-    } finally {
-      setLoadLoading(false);
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(inputValue); }
   };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setLoadError("");
-    setUploadLoading(true);
+    setIsUploadLoading(true); setLoadError("");
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${API_BASE}/ingest/upload`, {
-        method: "POST",
-        body: form,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
-      await fetchActiveDataset();
-      setDatasetKey(k => k + 1);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setUploadLoading(false);
-      e.target.value = "";
-    }
+      const res = await fetch(`${API_BASE}/ingest/upload`, { method: "POST", body: form });
+      if (!res.ok) { const d = await res.json(); setLoadError(d.detail ?? "Upload failed."); }
+      else { await fetchActiveDataset(); setSuggestRefreshKey(k => k + 1); }
+    } catch { setLoadError("Upload failed."); }
+    finally { setIsUploadLoading(false); if (uploadRef.current) uploadRef.current.value = ""; }
   };
 
-  return (
-    <div className="flex h-screen bg-[var(--bg)] overflow-hidden">
+  const handleLoadByPath = async () => {
+    if (!loadPath.trim()) return;
+    setIsPathLoading(true); setLoadError("");
+    try {
+      const res = await fetch(`${API_BASE}/ingest/generate_context`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv_file: loadPath }),
+      });
+      if (!res.ok) { const d = await res.json(); setLoadError(d.detail ?? "Load failed."); }
+      else { await fetchActiveDataset(); setSuggestRefreshKey(k => k + 1); setLoadPath(""); }
+    } catch { setLoadError("Load failed."); }
+    finally { setIsPathLoading(false); }
+  };
 
-      {/* ── SIDEBAR ────────────────────────────────────────────── */}
-      <aside className="hidden md:flex flex-col w-64 bg-[var(--bg-sidebar)] border-r border-[var(--border)] py-6 px-4 shrink-0">
+  const showWelcome    = messages.length === 1 && messages[0].id === "welcome";
+  const visibleMessages = messages.filter(m => m.id !== "welcome");
+
+  return (
+    <div style={{
+      display: "flex", height: "100vh", overflow: "hidden",
+      background: "#0B0F1A",
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+    }}>
+
+      {/* ══════════════════ SIDEBAR ══════════════════ */}
+      <aside style={{
+        width:     sidebarOpen ? 248 : 0,
+        minWidth:  sidebarOpen ? 248 : 0,
+        overflow:  "hidden",
+        transition: "width 0.25s cubic-bezier(0.16,1,0.3,1), min-width 0.25s cubic-bezier(0.16,1,0.3,1)",
+        background: "#0D1117",
+        display:   "flex",
+        flexDirection: "column",
+        borderRight: "1px solid rgba(255,255,255,0.06)",
+        flexShrink: 0,
+      }}>
 
         {/* Logo */}
-        <div className="flex items-center gap-2.5 mb-8 px-1">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="white" strokeWidth="2" fill="none" />
-              <polyline points="9 22 9 12 15 12 15 22" stroke="white" strokeWidth="2" />
-            </svg>
+        <div style={{
+          padding: "20px 16px 14px",
+          display: "flex", alignItems: "center", gap: 10,
+          borderBottom: "1px solid rgba(255,255,255,0.05)",
+          flexShrink: 0,
+        }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: 10, flexShrink: 0,
+            background: "linear-gradient(135deg,#3B82F6,#6366F1)",
+            boxShadow: "0 0 16px rgba(59,130,246,0.4)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Bot size={16} color="white" />
           </div>
           <div>
-            <div className="text-sm font-semibold text-[var(--text-primary)] leading-tight">Data Analyst</div>
-            <div className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.display_name : "Load dataset"}</div>
+            <p style={{ color: "#F1F5F9", fontWeight: 700, fontSize: 13, letterSpacing: "-0.02em" }}>
+              AI Analyst
+            </p>
+            <p style={{ color: "#334155", fontSize: 10, marginTop: 1 }}>Data Intelligence</p>
           </div>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            style={{
+              marginLeft: "auto", background: "none", border: "none",
+              color: "#334155", cursor: "pointer", padding: 4, borderRadius: 6,
+              transition: "color 0.15s",
+            }}
+            onMouseEnter={e => (e.currentTarget.style.color = "#64748B")}
+            onMouseLeave={e => (e.currentTarget.style.color = "#334155")}
+          >
+            <PanelLeftClose size={15} />
+          </button>
         </div>
 
-        {/* New Chat */}
-        <button
-          onClick={clearChat}
-          className="flex items-center gap-2 w-full px-3 py-2.5 rounded-xl text-sm font-medium
-                     bg-[var(--brand)] text-white hover:bg-[var(--brand-dark)]
-                     transition-colors duration-150 shadow-sm mb-4"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-          </svg>
-          New Chat
-        </button>
+        {/* New chat */}
+        <div style={{ padding: "12px 10px 10px", flexShrink: 0 }}>
+          <button
+            onClick={startNewChat}
+            className="glass-hover"
+            style={{
+              width: "100%", display: "flex", alignItems: "center", gap: 8,
+              padding: "9px 12px", borderRadius: 10,
+              border: "1px solid rgba(59,130,246,0.2)", background: "rgba(59,130,246,0.07)",
+              color: "#93C5FD", fontSize: 13, cursor: "pointer",
+              transition: "all 0.15s",
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = "rgba(59,130,246,0.14)";
+              e.currentTarget.style.borderColor = "rgba(59,130,246,0.4)";
+              e.currentTarget.style.boxShadow = "0 0 14px rgba(59,130,246,0.15)";
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = "rgba(59,130,246,0.07)";
+              e.currentTarget.style.borderColor = "rgba(59,130,246,0.2)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
+          >
+            <Plus size={14} />
+            New conversation
+          </button>
+        </div>
 
-        {/* Divider */}
-        <div className="border-t border-[var(--border-light)] my-2" />
+        <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "0 10px 10px", flexShrink: 0 }} />
 
-        {/* Load dataset — user provides path or upload (workflow step 1) */}
-        <div className="mb-4">
-          <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider px-1 mb-2">
-            Load dataset
-          </p>
+        {/* Data Sources */}
+        <div style={{ padding: "0 10px 10px", flexShrink: 0 }}>
+          <SectionLabel>Data Sources</SectionLabel>
+
+          {/* Active dataset */}
+          {datasetInfo ? (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "8px 10px", borderRadius: 9,
+              background: "rgba(16,185,129,0.07)", border: "1px solid rgba(16,185,129,0.2)",
+              marginBottom: 8,
+            }}>
+              <Database size={12} style={{ color: "#10B981", flexShrink: 0 }} />
+              <div style={{ overflow: "hidden" }}>
+                <p style={{ color: "#6EE7B7", fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {datasetInfo.display_name}
+                </p>
+                <p style={{ color: "#064E3B", fontSize: 10.5, marginTop: 1 }}>
+                  {datasetInfo.row_count.toLocaleString()} rows · active
+                </p>
+              </div>
+              <Circle size={6} style={{ color: "#10B981", marginLeft: "auto", flexShrink: 0 }} fill="#10B981" />
+            </div>
+          ) : (
+            <p style={{ fontSize: 11.5, color: "#334155", padding: "6px 10px", marginBottom: 6 }}>
+              No dataset loaded
+            </p>
+          )}
+
+          {/* Path input */}
           <input
             type="text"
             value={loadPath}
-            onChange={(e) => { setLoadPath(e.target.value); setLoadError(""); }}
-            onKeyDown={(e) => e.key === "Enter" && handleLoadByPath()}
-            placeholder="e.g. housing.csv or data/file.csv"
-            className="w-full px-2.5 py-2 text-xs rounded-lg border border-[var(--border)] bg-white placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--brand)]"
+            onChange={e => setLoadPath(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleLoadByPath()}
+            placeholder="Path to CSV or Excel…"
+            style={{
+              width: "100%", padding: "7px 10px", fontSize: 12,
+              background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 8, color: "#94A3B8", outline: "none", marginBottom: 6,
+              transition: "border-color 0.15s",
+            }}
+            onFocus={e => (e.currentTarget.style.borderColor = "rgba(59,130,246,0.5)")}
+            onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)")}
           />
-          <div className="flex gap-2 mt-2">
+
+          <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleLoadByPath}
-              disabled={loadLoading}
-              className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-[var(--brand)] text-white hover:bg-[var(--brand-dark)] disabled:opacity-50"
+              disabled={isPathLoading || !loadPath.trim()}
+              style={{
+                flex: 1, padding: "7px 0", fontSize: 12, borderRadius: 8, border: "none",
+                background: "#3B82F6", color: "#fff",
+                cursor: !loadPath.trim() || isPathLoading ? "not-allowed" : "pointer",
+                opacity: !loadPath.trim() ? 0.4 : 1,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                transition: "all 0.15s",
+              }}
+              onMouseEnter={e => { if (loadPath.trim()) (e.currentTarget as HTMLElement).style.background = "#2563EB"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "#3B82F6"; }}
             >
-              {loadLoading ? "Loading…" : "Load path"}
+              {isPathLoading
+                ? <Loader2 size={12} className="spinner" />
+                : <><FolderOpen size={12} /> Load</>}
             </button>
             <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadLoading}
-              className="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg bg-[var(--border-light)] text-[var(--text-primary)] text-center hover:bg-[var(--border)] disabled:opacity-50 cursor-pointer"
+              onClick={() => uploadRef.current?.click()}
+              disabled={isUploadLoading}
+              style={{
+                flex: 1, padding: "7px 0", fontSize: 12, borderRadius: 8,
+                background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+                color: "#94A3B8", cursor: isUploadLoading ? "not-allowed" : "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                transition: "background 0.15s",
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.09)"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.05)"; }}
             >
-              {uploadLoading ? "Uploading…" : "Upload file"}
+              {isUploadLoading
+                ? <Loader2 size={12} className="spinner" />
+                : <><Upload size={12} /> Upload</>}
             </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,.xlsx,.xls"
-              className="hidden"
-              onChange={handleUpload}
-              disabled={uploadLoading}
-            />
           </div>
-          {loadError && <p className="mt-1.5 text-xs text-red-600">{loadError}</p>}
+
+          {loadError && <p style={{ color: "#F87171", fontSize: 11, marginTop: 6 }}>{loadError}</p>}
+          <input ref={uploadRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} style={{ display: "none" }} />
         </div>
 
-        {/* Chat history — retrieve earlier chats */}
-        {chatHistory.length > 0 && (
-          <div className="mb-4 flex flex-col min-h-0">
-            <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider px-1 mb-2">
-              Chat history
-            </p>
-            <div className="flex-1 overflow-y-auto space-y-1 max-h-48">
-              {chatHistory.map((chat) => (
-                <button
-                  key={chat.id}
-                  type="button"
-                  onClick={() => loadChat(chat)}
-                  className={`w-full text-left px-2.5 py-2 rounded-lg text-xs truncate border transition-colors ${currentChatId === chat.id
-                    ? "bg-[var(--brand-light)] border-[var(--brand)] text-[var(--brand)]"
-                    : "border-transparent hover:bg-[var(--border-light)] text-[var(--text-secondary)]"
-                    }`}
-                  title={chat.title}
-                >
-                  <span className="block truncate font-medium">{chat.title}</span>
-                  <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">
-                    {new Date(chat.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "0 10px 10px", flexShrink: 0 }} />
 
-        {/* Capabilities */}
-        <div className="mt-2">
-          <p className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider px-1 mb-3">
-            Capabilities
-          </p>
-          {[
-            { icon: "🔍", label: "Search records" },
-            { icon: "📊", label: "Generate charts" },
-            { icon: "💡", label: "Analyze values" },
-            { icon: "📍", label: "Filter data" },
-          ].map(item => (
-            <div key={item.label}
-              className="flex items-center gap-2.5 px-2 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--border-light)] transition-colors">
-              <span className="text-base">{item.icon}</span>
-              <span>{item.label}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* Dataset info — shows current loaded file from backend */}
-        <div className="mt-auto">
-          <div className="rounded-xl bg-[var(--brand-light)] border border-[var(--brand)]/20 p-3">
-            <p className="text-xs font-semibold text-[var(--brand)] mb-1">Dataset</p>
-            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-              {datasetInfo
-                ? `${datasetInfo.display_name} — ${datasetInfo.row_count.toLocaleString()} rows loaded. You can ask questions or request charts.`
-                : "Load a CSV or Excel file above to start. Then ask questions or request charts."}
-            </p>
-          </div>
+        {/* Recent Queries */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 10px 12px" }}>
+          <SectionLabel>Recent Queries</SectionLabel>
+          {chatHistory.length === 0 ? (
+            <p style={{ fontSize: 11.5, color: "#1E293B", padding: "6px 10px" }}>No history yet</p>
+          ) : (
+            chatHistory.slice(0, 25).map(session => (
+              <button
+                key={session.id}
+                onClick={() => loadChat(session)}
+                style={{
+                  width: "100%", textAlign: "left", padding: "7px 10px 7px 8px",
+                  borderRadius: 8, border: "none", cursor: "pointer",
+                  fontSize: 12, marginBottom: 1,
+                  background: currentChatId === session.id ? "rgba(59,130,246,0.1)" : "transparent",
+                  color: currentChatId === session.id ? "#93C5FD" : "#475569",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  display: "flex", alignItems: "center", gap: 7,
+                  transition: "all 0.15s",
+                  borderLeft: currentChatId === session.id ? "2px solid #3B82F6" : "2px solid transparent",
+                }}
+                onMouseEnter={e => {
+                  if (currentChatId !== session.id) {
+                    (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.04)";
+                    (e.currentTarget as HTMLElement).style.color = "#94A3B8";
+                  }
+                }}
+                onMouseLeave={e => {
+                  if (currentChatId !== session.id) {
+                    (e.currentTarget as HTMLElement).style.background = "transparent";
+                    (e.currentTarget as HTMLElement).style.color = "#475569";
+                  }
+                }}
+              >
+                <MessageSquare size={11} style={{ flexShrink: 0, opacity: 0.6 }} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {session.title || "Untitled"}
+                </span>
+              </button>
+            ))
+          )}
         </div>
       </aside>
 
-      {/* ── MAIN CHAT AREA ─────────────────────────────────────── */}
-      <main className="flex flex-col flex-1 min-w-0">
+      {/* ══════════════════ MAIN WORKSPACE ══════════════════ */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
 
         {/* Top bar */}
-        <header className="flex items-center justify-between px-5 py-3.5 bg-white border-b border-[var(--border)] shrink-0">
-          <div className="flex items-center gap-3">
-            {/* Mobile logo */}
-            <div className="md:hidden w-7 h-7 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" stroke="white" strokeWidth="2" fill="none" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-sm font-semibold text-[var(--text-primary)]">AI Data Analyst</h1>
-              <p className="text-xs text-[var(--text-muted)]">{datasetInfo ? datasetInfo.display_name : "Load a dataset to start"}</p>
-            </div>
+        <header style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "12px 20px",
+          borderBottom: "1px solid rgba(255,255,255,0.05)",
+          background: "rgba(13,17,23,0.8)",
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
+          flexShrink: 0,
+          zIndex: 10,
+        }}>
+          <button
+            onClick={() => setSidebarOpen(v => !v)}
+            style={{
+              padding: 7, borderRadius: 8, border: "none",
+              background: "rgba(255,255,255,0.05)",
+              color: "#475569", cursor: "pointer", display: "flex",
+              transition: "all 0.15s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.09)"; e.currentTarget.style.color = "#94A3B8"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; e.currentTarget.style.color = "#475569"; }}
+          >
+            {sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
+          </button>
+
+          {/* Brand */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {!sidebarOpen && (
+              <div style={{
+                width: 26, height: 26, borderRadius: 8,
+                background: "linear-gradient(135deg,#3B82F6,#6366F1)",
+                boxShadow: "0 0 10px rgba(59,130,246,0.3)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <Bot size={13} color="white" />
+              </div>
+            )}
+            <span style={{ fontWeight: 600, fontSize: 14, color: "#E2E8F0", letterSpacing: "-0.02em" }}>
+              {datasetInfo?.display_name ?? "AI Data Analyst"}
+            </span>
+            {datasetInfo && (
+              <span style={{
+                fontSize: 10.5, color: "#3B82F6", background: "rgba(59,130,246,0.1)",
+                border: "1px solid rgba(59,130,246,0.2)", borderRadius: 20,
+                padding: "1px 8px", fontWeight: 500,
+              }}>
+                {datasetInfo.row_count.toLocaleString()} rows
+              </span>
+            )}
           </div>
 
-          {/* Status indicator */}
-          <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Agent online
+          {/* Status */}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{
+              width: 6, height: 6, borderRadius: "50%",
+              background: "#10B981", display: "inline-block",
+              boxShadow: "0 0 6px rgba(16,185,129,0.6)",
+            }} />
+            <span style={{ fontSize: 12, color: "#334155", fontWeight: 500 }}>Agent online</span>
           </div>
         </header>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-5">
-
-          {/* Welcome hero */}
-          {showWelcome && (
-            <div className="flex flex-col items-center text-center pt-6 pb-2 animate-fade-in">
-              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-400 to-brand-700
-                              flex items-center justify-center shadow-lg mb-4">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
-                  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
-                    stroke="white" strokeWidth="1.8" fill="none" />
-                  <polyline points="9 22 9 12 15 12 15 22" stroke="white" strokeWidth="1.8" />
-                </svg>
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 0 8px" }}>
+          {showWelcome ? (
+            /* Welcome screen */
+            <div style={{
+              display: "flex", flexDirection: "column", alignItems: "center",
+              justifyContent: "center", minHeight: "100%", padding: "64px 24px",
+            }}>
+              {/* Hero icon */}
+              <div style={{
+                position: "relative", marginBottom: 28,
+              }}>
+                <div style={{
+                  width: 64, height: 64, borderRadius: 20,
+                  background: "linear-gradient(135deg,#3B82F6,#6366F1)",
+                  boxShadow: "0 0 40px rgba(59,130,246,0.35)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <Sparkles size={28} color="white" />
+                </div>
+                <div style={{
+                  position: "absolute", inset: -2, borderRadius: 22,
+                  border: "1px solid rgba(59,130,246,0.3)",
+                  pointerEvents: "none",
+                }} />
               </div>
-              <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-1">
-                Data Explorer
-              </h2>
-              <p className="text-sm text-[var(--text-secondary)] max-w-sm leading-relaxed">
-                Load a CSV or Excel file in the sidebar, then ask me to find records, compare values, or generate charts from your dataset.
+
+              <h1 style={{
+                fontSize: 28, fontWeight: 800, color: "#F1F5F9",
+                letterSpacing: "-0.04em", marginBottom: 12, textAlign: "center",
+              }}>
+                What do you want to discover?
+              </h1>
+              <p style={{
+                fontSize: 15, color: "#475569", textAlign: "center",
+                maxWidth: 440, marginBottom: 44, lineHeight: 1.7,
+              }}>
+                Upload a CSV or Excel file, then ask anything. I&apos;ll query your data,
+                run statistics, and render interactive charts.
               </p>
+
+              <SuggestedQueries onSelect={sendMessage} refreshKey={suggestRefreshKey} />
+            </div>
+          ) : (
+            /* Chat messages */
+            <div style={{ maxWidth: 820, margin: "0 auto", padding: "32px 24px" }}>
+              {visibleMessages.map(msg => (
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  datasetName={datasetInfo?.table_name ?? "dataset"}
+                />
+              ))}
+              {isLoading && <TypingIndicator />}
+              <div ref={messagesEndRef} />
             </div>
           )}
-
-          {/* Message list */}
-          {messages.map(msg => (
-            <ChatMessage key={msg.id} message={msg} />
-          ))}
-
-          {/* Typing indicator */}
-          {isLoading && <TypingIndicator />}
-
-          {/* Suggestions (shown when only welcome message) */}
-          {showWelcome && !isLoading && (
-            <div className="pt-2">
-              <p className="text-xs text-[var(--text-muted)] text-center mb-3">Try asking…</p>
-              <SuggestedQueries onSelect={sendMessage} refreshKey={datasetKey} />
-            </div>
-          )}
-
-          <div ref={bottomRef} />
         </div>
 
-        {/* ── INPUT BAR ──────────────────────────────────────────── */}
-        <div className="shrink-0 px-4 md:px-8 py-4 bg-white border-t border-[var(--border)]">
-          <div className="max-w-3xl mx-auto">
-            <div className="flex items-end gap-2 bg-[var(--bg)] border border-[var(--border)]
-                            rounded-2xl px-4 py-3 shadow-sm focus-within:border-[var(--brand)]
-                            focus-within:shadow-md transition-all duration-200">
+        {/* Floating input bar */}
+        <div style={{
+          padding: "10px 20px 20px",
+          background: "linear-gradient(to top, #0B0F1A 70%, transparent)",
+          flexShrink: 0,
+        }}>
+          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <div
+              className="input-glow"
+              style={{
+                display: "flex", alignItems: "flex-end", gap: 8,
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.09)",
+                borderRadius: 18, padding: "10px 10px 10px 16px",
+                transition: "border-color 0.2s, box-shadow 0.2s",
+              }}
+            >
+              {/* Upload button */}
+              <button
+                onClick={() => uploadRef.current?.click()}
+                style={{
+                  flexShrink: 0, padding: "7px 10px", borderRadius: 10,
+                  background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)",
+                  color: "#475569", cursor: "pointer", fontSize: 12,
+                  display: "flex", alignItems: "center", gap: 5,
+                  transition: "all 0.15s", whiteSpace: "nowrap",
+                }}
+                onMouseEnter={e => {
+                  (e.currentTarget as HTMLElement).style.background = "rgba(59,130,246,0.1)";
+                  (e.currentTarget as HTMLElement).style.borderColor = "rgba(59,130,246,0.3)";
+                  (e.currentTarget as HTMLElement).style.color = "#93C5FD";
+                }}
+                onMouseLeave={e => {
+                  (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.05)";
+                  (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.08)";
+                  (e.currentTarget as HTMLElement).style.color = "#475569";
+                }}
+              >
+                <Upload size={13} />
+                <span style={{ display: "none", "@media(min-width:600px)": { display: "inline" } } as React.CSSProperties}>
+                  Upload CSV
+                </span>
+              </button>
 
+              {/* Textarea */}
               <textarea
-                ref={inputRef}
-                value={input}
-                onChange={handleInputChange}
+                ref={textareaRef}
+                value={inputValue}
+                onChange={e => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about your data — find records, compare values, plot charts…"
+                placeholder="Ask anything about your data…"
                 rows={1}
-                className="flex-1 bg-transparent text-sm text-[var(--text-primary)] resize-none
-                           outline-none placeholder:text-[var(--text-muted)] leading-relaxed
-                           max-h-40 overflow-y-auto"
+                style={{
+                  flex: 1, background: "transparent", border: "none", outline: "none",
+                  fontSize: 14, color: "#E2E8F0", resize: "none", lineHeight: 1.6,
+                  maxHeight: 160, fontFamily: "inherit",
+                }}
               />
 
+              {/* Send button */}
               <button
-                onClick={() => sendMessage(input)}
-                disabled={!input.trim() || isLoading}
-                className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center
-                           bg-[var(--brand)] text-white hover:bg-[var(--brand-dark)]
-                           disabled:opacity-30 disabled:cursor-not-allowed
-                           transition-all duration-150 shadow-sm hover:shadow-md"
+                onClick={() => sendMessage(inputValue)}
+                disabled={!inputValue.trim() || isLoading}
+                style={{
+                  flexShrink: 0, width: 36, height: 36, borderRadius: 11, border: "none",
+                  background: inputValue.trim() && !isLoading
+                    ? "linear-gradient(135deg,#3B82F6,#6366F1)"
+                    : "rgba(255,255,255,0.06)",
+                  color: inputValue.trim() && !isLoading ? "#fff" : "#334155",
+                  cursor: inputValue.trim() && !isLoading ? "pointer" : "not-allowed",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  boxShadow: inputValue.trim() && !isLoading ? "0 0 16px rgba(59,130,246,0.4)" : "none",
+                  transition: "all 0.2s",
+                }}
               >
-                {isLoading ? (
-                  <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none">
-                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.3" />
-                    <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"
-                      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
+                {isLoading
+                  ? <Loader2 size={15} className="spinner" />
+                  : <Send size={14} />}
               </button>
             </div>
 
-            <p className="text-xs text-[var(--text-muted)] text-center mt-2">
-              Press <kbd className="px-1 py-0.5 bg-[var(--border-light)] rounded text-[10px] font-mono">Enter</kbd> to send
-              &nbsp;·&nbsp;
-              <kbd className="px-1 py-0.5 bg-[var(--border-light)] rounded text-[10px] font-mono">Shift+Enter</kbd> for new line
+            <p style={{ textAlign: "center", fontSize: 11, color: "#1E293B", marginTop: 8 }}>
+              Enter to send · Shift+Enter for new line
             </p>
           </div>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

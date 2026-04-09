@@ -6,44 +6,28 @@ interface VegaChartProps {
   spec: Record<string, unknown>;
 }
 
+
 export default function VegaChart({ spec }: VegaChartProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
-
+    if (!ref.current) return;
     let cleanup: (() => void) | undefined;
 
-    const renderChart = async () => {
-      try {
-        const vegaEmbed = (await import("vega-embed")).default;
-        const result = await vegaEmbed(containerRef.current!, spec, {
-          actions: {
-            export:  true,
-            source:  false,
-            editor:  false,
-            compiled: false,
-          },
-          theme: "default",
-          renderer: "canvas",
+    import("vega-embed").then(({ default: embed }) => {
+      const merged = { ...spec, background: "transparent" } as Parameters<typeof embed>[1];
+      embed(ref.current!, merged, { actions: false, renderer: "canvas" })
+        .then(result => { cleanup = () => result.finalize(); })
+        .catch(err => {
+          if (ref.current) ref.current.innerHTML =
+            `<p style="color:#f87171;font-size:12px;padding:12px">Chart render failed: ${err}</p>`;
         });
-        cleanup = () => result.finalize();
-      } catch (err) {
-        console.error("Vega render error:", err);
-        if (containerRef.current) {
-          containerRef.current.innerHTML =
-            `<p class="text-red-500 text-sm p-3">Chart render failed: ${err}</p>`;
-        }
-      }
-    };
+    });
 
-    renderChart();
     return () => cleanup?.();
   }, [spec]);
 
   return (
-    <div className="vega-container mt-2 rounded-xl overflow-hidden bg-white border border-[var(--border)] p-3">
-      <div ref={containerRef} />
-    </div>
+    <div ref={ref} className="w-full" />
   );
 }
