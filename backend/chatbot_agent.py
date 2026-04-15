@@ -481,7 +481,8 @@ RULES:
 - If user asks BOTH (e.g. "find X and plot Y") → output TWO JSON blocks, one per line
 - For "most expensive", "highest", "top" → sort_order: "DESC" (for data_query) or agg_type with ORDER DESC (for data_stats)
 - For "cheapest", "lowest", "bottom" → sort_order: "ASC"
-- For greetings or questions unrelated to the data → reply in plain text only (no JSON)
+- For greetings (hi, hello, hey) → reply in plain text only (no JSON)
+- If user asks to DESCRIBE, EXPLAIN, TELL ABOUT, SUMMARISE the dataset or its columns → reply in plain text using the DATABASE SCHEMA & CONTEXT above. List the columns and what they represent. Never say you cannot answer.
 - IMPORTANT: Only include "format": "chart" when the user EXPLICITLY asks for a chart, plot, graph, or visualization.
   If the user asks a QUESTION (e.g. "which X has the most Y?", "what is the top X?"), use "format": "text".
 
@@ -507,6 +508,11 @@ User: What is the most common {example_categorical}?
 
 User: Hello
 Hello! I can help you explore the "{dataset_name}" dataset. Try asking me to find records, compare values, or plot charts!
+
+User: Tell me about your dataset / What columns do you have? / Describe the dataset
+The "{dataset_name}" dataset contains the following columns:
+{_build_column_list_for_prompt(meta)}
+You can ask me to filter, sort, aggregate, or chart any of these columns.
 """
     return prompt
 
