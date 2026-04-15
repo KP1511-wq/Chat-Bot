@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const config = { api: { bodyParser: false } };
+
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://127.0.0.1:8001";
 
 export async function POST(req: NextRequest) {
@@ -11,7 +13,9 @@ export async function POST(req: NextRequest) {
     });
     const data = await response.json();
     return NextResponse.json(data, { status: response.status });
-  } catch {
-    return NextResponse.json({ detail: "Upload failed." }, { status: 502 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[/api/upload error]", message);
+    return NextResponse.json({ detail: `Upload failed: ${message}` }, { status: 502 });
   }
 }
