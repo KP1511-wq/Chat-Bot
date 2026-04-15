@@ -1,0 +1,26 @@
+services:
+  # ── Backend: FastAPI chatbot agent ──────────────────────────────────────────
+  - type: web
+    name: chatbot-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn chatbot_agent:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false          # You will enter this manually in the Render dashboard
+    autoDeploy: true
+
+  # ── Frontend: Next.js ───────────────────────────────────────────────────────
+  - type: web
+    name: chatbot-frontend
+    runtime: node
+    rootDir: frontend/realestate-chat
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: AGENT_URL
+        sync: false              # Set this to: https://<your-backend-name>.onrender.com/chat
+      - key: PORT
+        value: 3000
+    autoDeploy: true

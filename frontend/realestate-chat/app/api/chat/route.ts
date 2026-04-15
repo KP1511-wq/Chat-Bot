@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const AGENT_URL = "http://127.0.0.1:8001/chat";
+const AGENT_URL = process.env.AGENT_URL ?? "http://127.0.0.1:8001/chat";
 
 export async function POST(req: NextRequest) {
   try {
