@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 
-export const config = { api: { bodyParser: false } };
-
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://127.0.0.1:8001";
 
 export async function POST(req: NextRequest) {
