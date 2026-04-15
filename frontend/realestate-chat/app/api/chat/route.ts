@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const AGENT_URL = process.env.AGENT_URL ?? "http://127.0.0.1:8001/chat";
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://127.0.0.1:8001";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const response = await fetch(AGENT_URL, {
+    const response = await fetch(`${BACKEND_URL}/chat`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify(body),

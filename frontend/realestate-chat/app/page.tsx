@@ -11,8 +11,7 @@ import SuggestedQueries from "./components/SuggestedQueries";
 import TypingIndicator from "./components/TypingIndicator";
 import type { Message } from "./components/ChatMessage";
 
-const API_BASE  = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8001";
-const AGENT_URL = `${API_BASE}/chat`;
+const AGENT_URL = "/api/chat";
 
 interface ChatSession {
   id: string;
@@ -82,7 +81,7 @@ export default function Page() {
 
   const fetchActiveDataset = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/health`);
+      const res = await fetch("/api/health");
       if (res.ok) {
         const d = await res.json();
         setDatasetInfo({
@@ -193,7 +192,7 @@ export default function Page() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${API_BASE}/ingest/upload`, { method: "POST", body: form });
+      const res = await fetch("/api/upload", { method: "POST", body: form });
       if (!res.ok) { const d = await res.json(); setLoadError(d.detail ?? "Upload failed."); }
       else { await fetchActiveDataset(); setSuggestRefreshKey(k => k + 1); }
     } catch { setLoadError("Upload failed."); }
@@ -204,7 +203,7 @@ export default function Page() {
     if (!loadPath.trim()) return;
     setIsPathLoading(true); setLoadError("");
     try {
-      const res = await fetch(`${API_BASE}/ingest/generate_context`, {
+      const res = await fetch("/api/load", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ csv_file: loadPath }),
