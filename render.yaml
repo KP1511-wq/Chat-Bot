@@ -21,6 +21,8 @@ services:
     envVars:
       - key: AGENT_URL
         sync: false              # Set this to: https://<your-backend-name>.onrender.com/chat
+      - key: NEXT_PUBLIC_API_BASE
+        sync: false              # Set this to: https://<your-backend-name>.onrender.com
       - key: PORT
         value: 3000
     autoDeploy: true
