@@ -2,7 +2,7 @@ import uvicorn
 import re
 import ast
 import traceback
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
@@ -656,8 +656,8 @@ async def get_suggestions():
     return {"suggestions": generate_suggested_queries()}
 
 
-def _do_ingest(csv_path: str) -> dict:
-    """Load CSV/Excel, build DB and context, set as active dataset. Returns summary dict."""
+def _do_ingest_fast(csv_path: str) -> dict:
+    """Fast part: read CSV, build DB, write basic context, set active dataset. Returns summary dict."""
     ext = os.path.splitext(csv_path)[1].lower()
     if ext in (".xlsx", ".xls"):
         df = pd.read_excel(csv_path)
@@ -673,11 +673,37 @@ def _do_ingest(csv_path: str) -> dict:
     df.to_sql(tname, conn, if_exists="replace", index=False)
     conn.close()
     context = build_column_descriptions(df, filename=csv_path)
-    context = _reflect_on_context(context)
+    # Write unverified context immediately so the agent can start working
     with open(KNOWLEDGE_BASE_FILE, "w") as f:
         json.dump(context, f, indent=2)
     set_active_dataset(csv_path)
     return {"filename": csv_path, "columns": list(df.columns), "rows": len(df)}
+
+
+def _do_reflect_background(csv_path: str):
+    """Slow part: LLM reflection — runs in background after response is sent."""
+    try:
+        with open(KNOWLEDGE_BASE_FILE, "r") as f:
+            context = json.load(f)
+        if context.get("filename") != csv_path:
+            return  # Dataset changed while we were waiting — skip
+        context = _reflect_on_context(context)
+        with open(KNOWLEDGE_BASE_FILE, "w") as f:
+            json.dump(context, f, indent=2)
+        print(f"✅ Background reflection complete for '{csv_path}'")
+    except Exception as e:
+        print(f"⚠️ Background reflection failed: {e}")
+
+
+def _do_ingest(csv_path: str) -> dict:
+    """Full ingest (fast + LLM reflection). Used by generate_context endpoint."""
+    result = _do_ingest_fast(csv_path)
+    with open(KNOWLEDGE_BASE_FILE, "r") as f:
+        context = json.load(f)
+    context = _reflect_on_context(context)
+    with open(KNOWLEDGE_BASE_FILE, "w") as f:
+        json.dump(context, f, indent=2)
+    return result
 
 
 @app.post("/ingest/generate_context")
@@ -703,8 +729,8 @@ async def ingest_and_analyze(request: DbIngestRequest):
 
 
 @app.post("/ingest/upload")
-async def ingest_upload(file: UploadFile = File(...)):
-    """User uploads a CSV file → saved, then data understanding pipeline runs → JSON stored → info passed to agent."""
+async def ingest_upload(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+    """Upload CSV → build DB immediately → return → LLM reflection runs in background."""
     if not file.filename or not file.filename.lower().endswith((".csv", ".xlsx", ".xls")):
         raise HTTPException(400, detail="Please upload a CSV or Excel file (.csv, .xlsx, .xls)")
     safe_name = os.path.basename(file.filename).replace(" ", "_")
@@ -713,7 +739,9 @@ async def ingest_upload(file: UploadFile = File(...)):
         content = await file.read()
         with open(path, "wb") as f:
             f.write(content)
-        result = _do_ingest(path)
+        result = _do_ingest_fast(path)
+        if background_tasks is not None:
+            background_tasks.add_task(_do_reflect_background, path)
         return {"status": "Context Generated", **result}
     except Exception as e:
         if os.path.exists(path):
