@@ -3,8 +3,6 @@
 import { useState, useEffect } from "react";
 import { BarChart2, Search, Lightbulb, TrendingUp, Filter, Hash } from "lucide-react";
 
-const API_BASE = "http://127.0.0.1:8001";
-
 type Suggestion = { icon: string; text: string };
 
 const ICON_MAP: Record<string, React.ReactNode> = {
@@ -33,7 +31,7 @@ export default function SuggestedQueries({ onSelect, refreshKey = 0 }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/schema/suggestions`)
+    fetch(`/api/suggestions`)
       .then(r => r.json())
       .then(data => {
         if (!cancelled && data.suggestions?.length) setSuggestions(data.suggestions);
