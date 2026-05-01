@@ -160,7 +160,7 @@ export default function Page() {
         signal:  abortRef.current.signal,
       });
       const data    = await res.json();
-      const content = data.response ?? "No response.";
+      const content = data.response || "No response.";
 
       const agentMsg: Message = {
         id: `a_${Date.now()}`, role: "agent",

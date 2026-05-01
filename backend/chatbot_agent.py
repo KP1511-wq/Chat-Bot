@@ -843,7 +843,7 @@ async def chat_endpoint(request: ChatRequest):
     system_prompt = build_dynamic_system_prompt()
 
     messages = [SystemMessage(content=system_prompt)]
-    for h in (request.history or [])[-6:]:
+    for h in (request.history or [])[-4:]:   # last 2 turns only — more causes Gemini confusion
         if h.role == "user":
             messages.append(HumanMessage(content=h.content))
         else:
@@ -854,12 +854,16 @@ async def chat_endpoint(request: ChatRequest):
         raw = str(model.invoke(messages).content).strip()
         print(f"[LLM raw] {raw[:400]}")
 
+        # Guard: if Gemini returns empty, give a safe fallback
+        if not raw:
+            return ChatResponse(response="I'm sorry, I didn't get a response. Please try again.")
+
         tool_calls = parse_all_tool_calls(raw)
         print(f"[tool_calls found] {len(tool_calls)}")
 
         # ── NO TOOL CALLS → plain text reply ──────────────────────────────
         if not tool_calls:
-            return ChatResponse(response=raw)
+            return ChatResponse(response=raw if raw else "I'm not sure how to answer that. Could you rephrase?")
 
         # ── SINGLE TOOL CALL ──────────────────────────────────────────────
         if len(tool_calls) == 1:
