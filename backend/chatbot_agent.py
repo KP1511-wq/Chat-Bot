@@ -296,6 +296,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: Union[dict, str]
+    is_data_response: bool = False
 
 
 # ─── CHAT AGENT HELPERS ──────────────────────────────────────────────────────
@@ -442,51 +443,66 @@ def build_dynamic_system_prompt() -> str:
     example_numeric2 = numeric_cols[1] if len(numeric_cols) > 1 else example_numeric
     example_categorical = categorical_cols[0] if categorical_cols else (all_cols[-1] if all_cols else "category")
 
-    prompt = f"""You are a data analysis agent for the dataset: "{dataset_name}".
-Your ONLY job is to output a JSON tool call — no explanations, no commentary, no markdown.
+    prompt = f"""You are a friendly AI data analyst assistant. You can hold normal conversations AND analyse the active dataset: "{dataset_name}".
 
-DATABASE SCHEMA & CONTEXT:
+─── ACTIVE DATASET ───
 {context_summary}
 
 AVAILABLE COLUMNS:
 {_build_column_list_for_prompt(meta)}
 
-TOOLS:
+─── TWO MODES ───
 
-data_query — fetch individual records from the dataset
-  Parameters (all optional):
-  filters: list of filter objects, each with "column", "op", and "value"
-    - column: any column name from the schema above
-    - op: "=" | "!=" | ">" | ">=" | "<" | "<=" | "LIKE" | "IN"
-    - value: the filter value (string or number, matching the column type)
-  columns: list of column names to return (omit for all columns)
-  sort_by: column name to sort by
-  sort_order: "ASC" or "DESC"
-  limit: number of rows to return (default 5)
+MODE 1 — CONVERSATIONAL (plain text reply, NO JSON):
+Use this for greetings, general knowledge questions, off-topic chat, and dataset explanations.
+Be warm, concise, and helpful. You are allowed to answer general questions that have nothing to do with data.
 
-data_stats — aggregated statistics for charts and summaries
-  Parameters:
-  group_by: column name to group by (optional — omit for overall aggregation)
-  target_col: column name to aggregate (REQUIRED)
-  agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX" (default "AVG")
-  filters: same format as data_query filters (optional)
-  format: "chart" or "text" (REQUIRED — use "chart" only when user explicitly asks for a visualization)
+MODE 2 — DATA ANALYSIS (raw JSON tool call, nothing else):
+Use this when the user asks to find, filter, sort, aggregate, or visualise rows from the dataset.
 
-RULES:
-- Output ONLY raw JSON. No text before or after. No explanations.
-- Use ONLY column names that exist in the schema above. Never invent column names.
-- If user asks to FIND, LIST, SHOW, GET, SEARCH specific rows → data_query
-- If user asks to PLOT, CHART, GRAPH, VISUALIZE → data_stats with "format": "chart"
-- If user asks WHICH, WHAT, WHO is the MOST, LEAST, HIGHEST, LOWEST, TOP, BOTTOM (a descriptive question about an aggregate) → data_stats with "format": "text"
-- If user asks BOTH (e.g. "find X and plot Y") → output TWO JSON blocks, one per line
-- For "most expensive", "highest", "top" → sort_order: "DESC" (for data_query) or agg_type with ORDER DESC (for data_stats)
-- For "cheapest", "lowest", "bottom" → sort_order: "ASC"
-- For greetings (hi, hello, hey) → reply in plain text only (no JSON)
-- If user asks to DESCRIBE, EXPLAIN, TELL ABOUT, SUMMARISE the dataset or its columns → reply in plain text using the DATABASE SCHEMA & CONTEXT above. List the columns and what they represent. Never say you cannot answer.
-- IMPORTANT: Only include "format": "chart" when the user EXPLICITLY asks for a chart, plot, graph, or visualization.
-  If the user asks a QUESTION (e.g. "which X has the most Y?", "what is the top X?"), use "format": "text".
+─── DATA ANALYSIS TOOLS ───
 
-EXAMPLES (using columns from the current dataset):
+data_query — fetch rows from the dataset
+  filters: list of {{"column","op","value"}} objects  (op: "=" | "!=" | ">" | ">=" | "<" | "<=" | "LIKE" | "IN")
+  columns: list of column names to return (omit = all)
+  sort_by, sort_order: "ASC" | "DESC"
+  limit: default 5
+
+data_stats — aggregated statistics or charts
+  group_by: column to group by (optional)
+  target_col: column to aggregate (REQUIRED)
+  agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX"
+  filters: same format as data_query
+  format: "chart" (only when user explicitly asks for a plot/chart/graph) or "text"
+
+─── DATA ANALYSIS RULES ───
+- Output ONLY raw JSON — no text before or after.
+- Use ONLY column names listed above. Never invent columns.
+- FIND / LIST / SHOW / SEARCH specific rows → data_query
+- PLOT / CHART / GRAPH / VISUALIZE → data_stats with "format":"chart"
+- WHICH / WHAT / WHO is MOST / LEAST / TOP / BOTTOM (aggregate question) → data_stats with "format":"text"
+- Both find + plot in one request → TWO JSON blocks, one per line
+- "top", "highest", "most expensive" → sort_order "DESC"
+- "bottom", "lowest", "cheapest" → sort_order "ASC"
+- If user asks a question (not requesting a chart) always use "format":"text"
+
+─── EXAMPLES ───
+
+User: Hi! How are you?
+Hey! I'm doing great, thanks for asking. I'm here to help you explore the "{dataset_name}" dataset. You can ask me to find records, run statistics, or plot charts. What would you like to know?
+
+User: What can you do?
+I'm an AI data analyst! I can:
+• Query and filter records from your dataset
+• Compute statistics (averages, totals, counts, etc.)
+• Generate charts and visualisations
+• Answer general questions
+Just ask me anything about your data or anything else on your mind!
+
+User: Tell me about the dataset
+The "{dataset_name}" dataset contains {len(all_cols)} columns:
+{_build_column_list_for_prompt(meta)}
+Ask me to filter, sort, aggregate, or chart any of these!
 
 User: Show me the top 5 records by {example_numeric}
 {{"tool":"data_query","parameters":{{"sort_by":"{example_numeric}","sort_order":"DESC","limit":5}}}}
@@ -500,19 +516,8 @@ User: Plot average {example_numeric} by {example_categorical}
 User: Which {example_categorical} has the highest {example_numeric}?
 {{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"SUM","format":"text"}}}}
 
-User: Show count of records grouped by {example_categorical}
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","format":"chart"}}}}
-
 User: What is the most common {example_categorical}?
 {{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","format":"text"}}}}
-
-User: Hello
-Hello! I can help you explore the "{dataset_name}" dataset. Try asking me to find records, compare values, or plot charts!
-
-User: Tell me about your dataset / What columns do you have? / Describe the dataset
-The "{dataset_name}" dataset contains the following columns:
-{_build_column_list_for_prompt(meta)}
-You can ask me to filter, sort, aggregate, or chart any of these columns.
 """
     return prompt
 
@@ -923,7 +928,7 @@ Summarise clearly and concisely.
 Format numeric values appropriately (use $ for monetary values, commas for large numbers).
 Highlight the most relevant facts. No raw JSON in reply.
 """)]).content
-                return ChatResponse(response=str(summary))
+                return ChatResponse(response=str(summary), is_data_response=True)
 
             elif tool_name == "data_stats":
                 print(f"[data_stats] {params}")
@@ -950,7 +955,7 @@ Highlight the most relevant facts. No raw JSON in reply.
                 wants_chart = _user_wants_chart(request.message, requested_format)
 
                 if wants_chart:
-                    return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
+                    return ChatResponse(response=build_vegalite_spec(data["result"], request.message), is_data_response=True)
                 else:
                     # Return a descriptive text summary instead of a chart
                     meta = get_table_meta()
@@ -965,7 +970,7 @@ Summarise clearly and concisely, directly answering the user's question.
 Format numeric values appropriately (use $ for monetary values, commas for large numbers).
 Highlight the key finding. No raw JSON in reply.
 """)]).content
-                    return ChatResponse(response=str(summary))
+                    return ChatResponse(response=str(summary), is_data_response=True)
 
         # ── MULTI-TOOL CALL (e.g. find + plot) ────────────────────────────
         query_calls = [tc for tc in tool_calls if tc.get("tool") == "data_query"]
@@ -996,7 +1001,7 @@ Highlight the key finding. No raw JSON in reply.
             wants_chart = _user_wants_chart(request.message, requested_format)
 
             if wants_chart:
-                return ChatResponse(response=build_vegalite_spec(data["result"], request.message))
+                return ChatResponse(response=build_vegalite_spec(data["result"], request.message), is_data_response=True)
             else:
                 meta = get_table_meta()
                 dataset_name = pretty_dataset_name(meta.get("filename", "dataset"))
@@ -1010,7 +1015,7 @@ Summarise clearly and concisely, directly answering the user's question.
 Format numeric values appropriately (use $ for monetary values, commas for large numbers).
 Highlight the key finding. No raw JSON in reply.
 """)]).content
-                return ChatResponse(response=str(summary))
+                return ChatResponse(response=str(summary), is_data_response=True)
 
         # Fallback: run the first query call
         q_params = query_calls[0].get("parameters", {})
@@ -1034,7 +1039,7 @@ Results ({result_data.get('count', 0)} rows):
 
 Summarise clearly. Format numeric values appropriately. No raw JSON.
 """)]).content
-        return ChatResponse(response=str(summary))
+        return ChatResponse(response=str(summary), is_data_response=True)
 
     except Exception as e:
         traceback.print_exc()

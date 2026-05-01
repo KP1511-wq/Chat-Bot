@@ -15,6 +15,7 @@ export interface Message {
   timestamp: Date;
   isError?: boolean;
   userQuery?: string;
+  isDataResponse?: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -231,8 +232,7 @@ export default function ChatMessage({
   const isUser  = message.role === "user";
   const isChart = !isUser && isVegaSpec(message.content);
   const isError = message.isError;
-  const showSystemThinking = !isUser && !isChart && !isError &&
-    typeof message.content === "string" && message.content.length > 60;
+  const showSystemThinking = !isUser && !isChart && !isError && !!message.isDataResponse;
 
   return (
     <div

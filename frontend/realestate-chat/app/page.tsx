@@ -157,8 +157,9 @@ export default function Page() {
       const agentMsg: Message = {
         id: `a_${Date.now()}`, role: "agent",
         content, timestamp: new Date(),
-        isError:   typeof content === "string" && content.startsWith("Error:"),
-        userQuery: trimmed,
+        isError:        typeof content === "string" && content.startsWith("Error:"),
+        userQuery:      trimmed,
+        isDataResponse: !!data.is_data_response,
       };
 
       setMessages(prev => {
