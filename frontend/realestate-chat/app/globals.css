@@ -4,21 +4,80 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Base ──────────────────────────────────────────────────────────────────── */
-:root {
+/* ── Dark theme (default) ──────────────────────────────────────────────────── */
+:root,
+[data-theme="dark"] {
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
   --bg:           #0B0F1A;
   --sidebar-bg:   #0D1117;
+  --header-bg:    rgba(13, 17, 23, 0.85);
+  --border:       rgba(255, 255, 255, 0.06);
+  --border-md:    rgba(255, 255, 255, 0.08);
+  --border-lg:    rgba(255, 255, 255, 0.13);
+  --divider:      rgba(255, 255, 255, 0.05);
   --panel-bg:     rgba(255, 255, 255, 0.04);
   --panel-border: rgba(255, 255, 255, 0.08);
   --panel-hover:  rgba(255, 255, 255, 0.07);
+  --btn-bg:       rgba(255, 255, 255, 0.05);
+  --btn-border:   rgba(255, 255, 255, 0.09);
+  --btn-hover-bg: rgba(255, 255, 255, 0.09);
+  --input-bg:     rgba(255, 255, 255, 0.04);
+  --input-border: rgba(255, 255, 255, 0.08);
+  --row-hover:    rgba(255, 255, 255, 0.03);
   --accent:       #3B82F6;
   --accent-glow:  rgba(59, 130, 246, 0.25);
-  --text-1:       #F1F5F9;
-  --text-2:       #94A3B8;
-  --text-3:       #475569;
+  --user-bubble-bg:     rgba(59, 130, 246, 0.12);
+  --user-bubble-border: rgba(59, 130, 246, 0.25);
+  --text-1:   #F1F5F9;
+  --text-1a:  #E2E8F0;
+  --text-msg: #CBD5E1;
+  --text-2:   #94A3B8;
+  --text-2a:  #64748B;
+  --text-3:   #475569;
+  --text-4:   #334155;
+  --text-5:   #1E293B;
+  --code-bg:  #0a0d14;
+  --gradient-overlay: linear-gradient(to top, #0B0F1A 70%, transparent);
+  --scrollbar-thumb:       rgba(255, 255, 255, 0.10);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.18);
+}
+
+/* ── Light theme ───────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg:           #F8FAFC;
+  --sidebar-bg:   #F1F5F9;
+  --header-bg:    rgba(248, 250, 252, 0.9);
+  --border:       rgba(0, 0, 0, 0.07);
+  --border-md:    rgba(0, 0, 0, 0.09);
+  --border-lg:    rgba(0, 0, 0, 0.13);
+  --divider:      rgba(0, 0, 0, 0.06);
+  --panel-bg:     rgba(0, 0, 0, 0.025);
+  --panel-border: rgba(0, 0, 0, 0.09);
+  --panel-hover:  rgba(0, 0, 0, 0.04);
+  --btn-bg:       rgba(0, 0, 0, 0.05);
+  --btn-border:   rgba(0, 0, 0, 0.10);
+  --btn-hover-bg: rgba(0, 0, 0, 0.08);
+  --input-bg:     rgba(0, 0, 0, 0.04);
+  --input-border: rgba(0, 0, 0, 0.10);
+  --row-hover:    rgba(0, 0, 0, 0.03);
+  --accent:       #3B82F6;
+  --accent-glow:  rgba(59, 130, 246, 0.15);
+  --user-bubble-bg:     rgba(59, 130, 246, 0.08);
+  --user-bubble-border: rgba(59, 130, 246, 0.2);
+  --text-1:   #0F172A;
+  --text-1a:  #1E293B;
+  --text-msg: #334155;
+  --text-2:   #64748B;
+  --text-2a:  #64748B;
+  --text-3:   #94A3B8;
+  --text-4:   #94A3B8;
+  --text-5:   #CBD5E1;
+  --code-bg:  #1e293b;
+  --gradient-overlay: linear-gradient(to top, #F8FAFC 70%, transparent);
+  --scrollbar-thumb:       rgba(0, 0, 0, 0.12);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.20);
 }
 
 html, body {
@@ -28,13 +87,14 @@ html, body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background 0.2s ease, color 0.2s ease;
 }
 
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar        { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track  { background: transparent; }
-::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.10); border-radius: 99px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+::-webkit-scrollbar-thumb  { background: var(--scrollbar-thumb); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 /* ── Glassmorphism ─────────────────────────────────────────────────────────── */
 .glass {
@@ -46,7 +106,7 @@ html, body {
 
 .glass-hover:hover {
   background: var(--panel-hover);
-  border-color: rgba(255,255,255,0.13);
+  border-color: var(--border-lg);
 }
 
 /* ── Animations ────────────────────────────────────────────────────────────── */
@@ -101,8 +161,8 @@ html, body {
   font-family: var(--font-mono);
   font-size:   12.5px;
   line-height: 1.7;
-  background:  #0a0d14;
-  border:      1px solid rgba(255,255,255,0.07);
+  background:  var(--code-bg);
+  border:      1px solid var(--border);
   border-radius: 10px;
   padding:     16px;
   color:       #7dd3fc;
@@ -127,7 +187,7 @@ html, body {
   font-weight: 500;
   text-align: left;
   padding: 8px 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
+  border-bottom: 1px solid var(--border-md);
   white-space: nowrap;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -135,18 +195,18 @@ html, body {
 }
 .data-table td {
   padding: 8px 12px;
-  color: #CBD5E1;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  color: var(--text-msg);
+  border-bottom: 1px solid var(--divider);
   white-space: nowrap;
 }
 .data-table tr:hover td {
-  background: rgba(255,255,255,0.03);
+  background: var(--row-hover);
 }
 .data-table tr:last-child td {
   border-bottom: none;
 }
 
-/* ── Vega dark override ─────────────────────────────────────────────────────── */
+/* ── Vega override ──────────────────────────────────────────────────────────── */
 .vega-embed               { width: 100% !important; background: transparent !important; }
 .vega-embed canvas,
 .vega-embed svg           { max-width: 100% !important; }

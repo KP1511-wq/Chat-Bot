@@ -95,22 +95,22 @@ function SystemThinking({ userQuery, datasetName }: { userQuery: string; dataset
 
   return (
     <div className="mt-3 rounded-xl overflow-hidden"
-      style={{ border: "1px solid rgba(255,255,255,0.06)", background: "rgba(0,0,0,0.25)" }}>
+      style={{ border: "1px solid var(--border)", background: "rgba(0,0,0,0.15)" }}>
       <button
         onClick={() => setOpen(v => !v)}
         className="w-full flex items-center gap-2.5 px-4 py-2.5 text-left transition-colors"
-        style={{ color: "#64748B" }}
-        onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")}
+        style={{ color: "var(--text-2a)" }}
+        onMouseEnter={e => (e.currentTarget.style.background = "var(--row-hover)")}
         onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
       >
         <Zap size={13} style={{ color: "#F59E0B", flexShrink: 0 }} />
-        <span style={{ fontSize: 12, fontWeight: 500, color: "#94A3B8", letterSpacing: "0.02em" }}>
+        <span style={{ fontSize: 12, fontWeight: 500, color: "var(--text-2)", letterSpacing: "0.02em" }}>
           System Thinking
         </span>
         <ChevronDown
           size={13}
           style={{
-            marginLeft: "auto", color: "#475569",
+            marginLeft: "auto", color: "var(--text-3)",
             transform: open ? "rotate(180deg)" : "rotate(0deg)",
             transition: "transform 0.2s ease",
           }}
@@ -124,13 +124,13 @@ function SystemThinking({ userQuery, datasetName }: { userQuery: string; dataset
             {steps.map((step, i) => (
               <div key={i} className="flex items-center gap-2">
                 <CheckCircle2 size={11} style={{ color: "#10B981", flexShrink: 0 }} />
-                <span style={{ fontSize: 11.5, color: "#64748B" }}>{step}</span>
+                <span style={{ fontSize: 11.5, color: "var(--text-2a)" }}>{step}</span>
               </div>
             ))}
           </div>
 
           {/* SQL */}
-          <div style={{ fontSize: 11, color: "#475569", marginBottom: 6, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+          <div style={{ fontSize: 11, color: "var(--text-3)", marginBottom: 6, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase" }}>
             Generated SQL
           </div>
           <div className="code-block" style={{ fontSize: 12 }}>
@@ -257,18 +257,18 @@ export default function ChatMessage({
         {isUser ? (
           /* User bubble */
           <div style={{
-            background: "rgba(59,130,246,0.12)",
-            border: "1px solid rgba(59,130,246,0.25)",
+            background: "var(--user-bubble-bg)",
+            border: "1px solid var(--user-bubble-border)",
             padding: "10px 16px",
             borderRadius: "16px 16px 4px 16px",
-            fontSize: 14, lineHeight: 1.65, color: "#E2E8F0",
+            fontSize: 14, lineHeight: 1.65, color: "var(--text-1a)",
           }}>
             {typeof message.content === "string" ? message.content : ""}
           </div>
         ) : isChart ? (
           /* Bento chart card */
           <div className="glass card-enter rounded-2xl p-5"
-            style={{ boxShadow: "0 4px 24px rgba(0,0,0,0.4), 0 1px 0 rgba(255,255,255,0.06) inset" }}>
+            style={{ boxShadow: "0 4px 24px rgba(0,0,0,0.2), 0 1px 0 var(--border-lg) inset" }}>
             <ChartCard
               spec={message.content as Record<string, unknown>}
               userQuery={message.userQuery ?? ""}
@@ -280,11 +280,11 @@ export default function ChatMessage({
           <div className="glass card-enter rounded-2xl p-5"
             style={{
               boxShadow: isError
-                ? "0 0 0 1px rgba(239,68,68,0.3), 0 4px 24px rgba(0,0,0,0.3)"
-                : "0 4px 24px rgba(0,0,0,0.4), 0 1px 0 rgba(255,255,255,0.06) inset",
+                ? "0 0 0 1px rgba(239,68,68,0.3), 0 4px 24px rgba(0,0,0,0.2)"
+                : "0 4px 24px rgba(0,0,0,0.2), 0 1px 0 var(--border-lg) inset",
               borderColor: isError ? "rgba(239,68,68,0.25)" : undefined,
             }}>
-            <p style={{ fontSize: 14, lineHeight: 1.75, color: isError ? "#FCA5A5" : "#CBD5E1" }}>
+            <p style={{ fontSize: 14, lineHeight: 1.75, color: isError ? "#FCA5A5" : "var(--text-msg)" }}>
               {typeof message.content === "string"
                 ? formatText(message.content)
                 : JSON.stringify(message.content)}

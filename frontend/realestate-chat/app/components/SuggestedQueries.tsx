@@ -49,14 +49,14 @@ export default function SuggestedQueries({ onSelect, refreshKey = 0 }: Props) {
           className="glass glass-hover group flex items-start gap-3 p-3.5 rounded-xl text-left transition-all duration-200 card-enter"
           style={{
             animationDelay: `${i * 60}ms`,
-            border: "1px solid rgba(255,255,255,0.08)",
+            border: "1px solid var(--border-md)",
           }}
           onMouseEnter={e => {
             (e.currentTarget as HTMLElement).style.borderColor = "rgba(59,130,246,0.4)";
             (e.currentTarget as HTMLElement).style.boxShadow  = "0 0 16px rgba(59,130,246,0.12)";
           }}
           onMouseLeave={e => {
-            (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.08)";
+            (e.currentTarget as HTMLElement).style.borderColor = "var(--border-md)";
             (e.currentTarget as HTMLElement).style.boxShadow  = "none";
           }}
         >
@@ -64,7 +64,7 @@ export default function SuggestedQueries({ onSelect, refreshKey = 0 }: Props) {
             style={{ color: "#3B82F6" }}>
             {ICON_MAP[s.icon] ?? <Search size={14} />}
           </span>
-          <span className="text-sm leading-snug" style={{ color: "#94A3B8" }}>
+          <span className="text-sm leading-snug" style={{ color: "var(--text-2)" }}>
             {s.text}
           </span>
         </button>
