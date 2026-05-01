@@ -39,58 +39,16 @@ function formatText(text: string): React.ReactNode {
   });
 }
 
-function generateMockSQL(query: string, table: string): string {
-  const q = query.toLowerCase();
-  const tbl = table || "dataset";
-
-  if (q.includes("plot") || q.includes("chart") || q.includes("average") || q.includes("avg")) {
-    const m = q.match(/by\s+(\w+)/);
-    const grp = m?.[1] ?? "category";
-    return `SELECT\n  ${grp},\n  AVG(value) AS avg_value\nFROM ${tbl}\nGROUP BY ${grp}\nORDER BY avg_value DESC\nLIMIT 20;`;
-  }
-  if (q.includes("count") || q.includes("how many")) {
-    const m = q.match(/by\s+(\w+)/);
-    const grp = m?.[1] ?? "category";
-    return `SELECT\n  ${grp},\n  COUNT(*) AS total\nFROM ${tbl}\nGROUP BY ${grp}\nORDER BY total DESC;`;
-  }
-  if (q.includes("top") || q.includes("highest") || q.includes("most")) {
-    return `SELECT *\nFROM ${tbl}\nORDER BY value DESC\nLIMIT 5;`;
-  }
-  if (q.includes("bottom") || q.includes("lowest") || q.includes("least")) {
-    return `SELECT *\nFROM ${tbl}\nORDER BY value ASC\nLIMIT 5;`;
-  }
-  if (q.includes("sum") || q.includes("total")) {
-    return `SELECT\n  category,\n  SUM(value) AS total_value\nFROM ${tbl}\nGROUP BY category\nORDER BY total_value DESC;`;
-  }
-  return `SELECT *\nFROM ${tbl}\nWHERE 1=1\nLIMIT 10;`;
-}
-
-function highlightSQL(sql: string): React.ReactNode {
-  const keywords = /\b(SELECT|FROM|WHERE|GROUP BY|ORDER BY|LIMIT|COUNT|AVG|SUM|MAX|MIN|AS|DESC|ASC|AND|OR|IN|LIKE|JOIN|ON|HAVING|DISTINCT)\b/g;
-  return sql.split("\n").map((line, i) => {
-    const parts = line.split(keywords);
-    return (
-      <div key={i}>
-        {parts.map((part, j) =>
-          keywords.test(part)
-            ? <span key={j} style={{ color: "#c084fc" }}>{part}</span>
-            : <span key={j} style={{ color: "#7dd3fc" }}>{part}</span>
-        )}
-      </div>
-    );
-  });
-}
 
 // ── System Thinking accordion ─────────────────────────────────────────────────
-function SystemThinking({ userQuery, datasetName }: { userQuery: string; datasetName: string }) {
+function SystemThinking() {
   const [open, setOpen] = useState(false);
-  const sql = generateMockSQL(userQuery, datasetName);
 
   const steps = [
-    "Analyzing query intent",
+    "Analysing query intent",
     "Mapping to dataset schema",
-    "Generating optimized SQL",
-    "Executing query & synthesizing result",
+    "Building query parameters",
+    "Executing query & synthesising result",
   ];
 
   return (
@@ -119,22 +77,13 @@ function SystemThinking({ userQuery, datasetName }: { userQuery: string; dataset
 
       <div className={`accordion-content ${open ? "open" : "closed"}`}>
         <div style={{ padding: "0 16px 14px" }}>
-          {/* Steps */}
-          <div className="flex flex-col gap-1.5 mb-3">
+          <div className="flex flex-col gap-1.5">
             {steps.map((step, i) => (
               <div key={i} className="flex items-center gap-2">
                 <CheckCircle2 size={11} style={{ color: "#10B981", flexShrink: 0 }} />
                 <span style={{ fontSize: 11.5, color: "var(--text-2a)" }}>{step}</span>
               </div>
             ))}
-          </div>
-
-          {/* SQL */}
-          <div style={{ fontSize: 11, color: "var(--text-3)", marginBottom: 6, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase" }}>
-            Generated SQL
-          </div>
-          <div className="code-block" style={{ fontSize: 12 }}>
-            {highlightSQL(sql)}
           </div>
         </div>
       </div>
@@ -216,7 +165,7 @@ function ChartCard({
           : <DataTable data={rawData} />}
       </div>
 
-      <SystemThinking userQuery={userQuery} datasetName={datasetName} />
+      <SystemThinking />
     </div>
   );
 }
@@ -290,12 +239,7 @@ export default function ChatMessage({
                 : JSON.stringify(message.content)}
             </p>
 
-            {showSystemThinking && (
-              <SystemThinking
-                userQuery={message.userQuery ?? "query"}
-                datasetName={datasetName}
-              />
-            )}
+            {showSystemThinking && <SystemThinking />}
           </div>
         )}
 

@@ -148,10 +148,15 @@ export default function Page() {
     abortRef.current = new AbortController();
 
     try {
+      const history = messages
+        .filter(m => m.id !== "welcome" && typeof m.content === "string")
+        .slice(-6)
+        .map(m => ({ role: m.role, content: m.content as string }));
+
       const res     = await fetch(AGENT_URL, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ message: trimmed }),
+        body:    JSON.stringify({ message: trimmed, history }),
         signal:  abortRef.current.signal,
       });
       const data    = await res.json();

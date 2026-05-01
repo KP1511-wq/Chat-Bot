@@ -12,7 +12,7 @@ import os
 import uuid
 import datetime
 from typing import Optional, List, Any, Dict, Union
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 try:
     from config import model
@@ -290,8 +290,13 @@ class DataStatsRequest(BaseModel):
     filters:    Optional[List[Dict[str, Any]]] = None
 
 
+class HistoryMessage(BaseModel):
+    role: str   # "user" | "agent"
+    content: str
+
 class ChatRequest(BaseModel):
     message: str
+    history: Optional[List[HistoryMessage]] = None
 
 
 class ChatResponse(BaseModel):
@@ -443,81 +448,35 @@ def build_dynamic_system_prompt() -> str:
     example_numeric2 = numeric_cols[1] if len(numeric_cols) > 1 else example_numeric
     example_categorical = categorical_cols[0] if categorical_cols else (all_cols[-1] if all_cols else "category")
 
-    prompt = f"""You are a friendly AI data analyst assistant. You can hold normal conversations AND analyse the active dataset: "{dataset_name}".
+    prompt = f"""You are a helpful AI data analyst. Respond naturally to conversation, and use JSON tool calls only for data queries.
 
-─── ACTIVE DATASET ───
+Dataset: "{dataset_name}"
 {context_summary}
 
-AVAILABLE COLUMNS:
-{_build_column_list_for_prompt(meta)}
+Columns: {_build_column_list_for_prompt(meta)}
 
-─── TWO MODES ───
+When the user wants to retrieve, filter, sort, aggregate, or chart data, output ONLY a raw JSON tool call — no surrounding text.
+For everything else (greetings, general questions, dataset descriptions), reply in plain conversational text.
 
-MODE 1 — CONVERSATIONAL (plain text reply, NO JSON):
-Use this for greetings, general knowledge questions, off-topic chat, and dataset explanations.
-Be warm, concise, and helpful. You are allowed to answer general questions that have nothing to do with data.
+Tools:
+data_query: {{"tool":"data_query","parameters":{{"filters":[{{"column":"X","op":"=","value":"Y"}}],"sort_by":"col","sort_order":"DESC","limit":5}}}}
+  op options: "=" | "!=" | ">" | ">=" | "<" | "<=" | "LIKE" | "IN"
 
-MODE 2 — DATA ANALYSIS (raw JSON tool call, nothing else):
-Use this when the user asks to find, filter, sort, aggregate, or visualise rows from the dataset.
-
-─── DATA ANALYSIS TOOLS ───
-
-data_query — fetch rows from the dataset
-  filters: list of {{"column","op","value"}} objects  (op: "=" | "!=" | ">" | ">=" | "<" | "<=" | "LIKE" | "IN")
-  columns: list of column names to return (omit = all)
-  sort_by, sort_order: "ASC" | "DESC"
-  limit: default 5
-
-data_stats — aggregated statistics or charts
-  group_by: column to group by (optional)
-  target_col: column to aggregate (REQUIRED)
+data_stats: {{"tool":"data_stats","parameters":{{"group_by":"col","target_col":"col","agg_type":"SUM","format":"text"}}}}
   agg_type: "AVG" | "SUM" | "COUNT" | "MIN" | "MAX"
-  filters: same format as data_query
-  format: "chart" (only when user explicitly asks for a plot/chart/graph) or "text"
+  format: "chart" only when user explicitly asks to plot/chart/visualize — otherwise "text"
 
-─── DATA ANALYSIS RULES ───
-- Output ONLY raw JSON — no text before or after.
-- Use ONLY column names listed above. Never invent columns.
-- FIND / LIST / SHOW / SEARCH specific rows → data_query
-- PLOT / CHART / GRAPH / VISUALIZE → data_stats with "format":"chart"
-- WHICH / WHAT / WHO is MOST / LEAST / TOP / BOTTOM (aggregate question) → data_stats with "format":"text"
-- Both find + plot in one request → TWO JSON blocks, one per line
-- "top", "highest", "most expensive" → sort_order "DESC"
-- "bottom", "lowest", "cheapest" → sort_order "ASC"
-- If user asks a question (not requesting a chart) always use "format":"text"
+Rules:
+- Only use column names that exist in the schema above.
+- top/highest/most → sort_order "DESC"; bottom/lowest/least → sort_order "ASC"
+- Aggregate questions (which X has most Y?) → data_stats "format":"text"
+- Visualisation requests → data_stats "format":"chart"
 
-─── EXAMPLES ───
-
-User: Hi! How are you?
-Hey! I'm doing great, thanks for asking. I'm here to help you explore the "{dataset_name}" dataset. You can ask me to find records, run statistics, or plot charts. What would you like to know?
-
-User: What can you do?
-I'm an AI data analyst! I can:
-• Query and filter records from your dataset
-• Compute statistics (averages, totals, counts, etc.)
-• Generate charts and visualisations
-• Answer general questions
-Just ask me anything about your data or anything else on your mind!
-
-User: Tell me about the dataset
-The "{dataset_name}" dataset contains {len(all_cols)} columns:
-{_build_column_list_for_prompt(meta)}
-Ask me to filter, sort, aggregate, or chart any of these!
-
-User: Show me the top 5 records by {example_numeric}
-{{"tool":"data_query","parameters":{{"sort_by":"{example_numeric}","sort_order":"DESC","limit":5}}}}
-
-User: Find records where {example_categorical} equals a specific value
-{{"tool":"data_query","parameters":{{"filters":[{{"column":"{example_categorical}","op":"=","value":"EXAMPLE"}}],"limit":5}}}}
-
-User: Plot average {example_numeric} by {example_categorical}
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","format":"chart"}}}}
-
-User: Which {example_categorical} has the highest {example_numeric}?
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"SUM","format":"text"}}}}
-
-User: What is the most common {example_categorical}?
-{{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"COUNT","format":"text"}}}}
+Examples:
+User: hi! → Hey! I can help you explore "{dataset_name}". Ask me to filter, aggregate, or chart your data!
+User: show top 5 by {example_numeric} → {{"tool":"data_query","parameters":{{"sort_by":"{example_numeric}","sort_order":"DESC","limit":5}}}}
+User: which {example_categorical} has the highest {example_numeric}? → {{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"SUM","format":"text"}}}}
+User: plot avg {example_numeric} by {example_categorical} → {{"tool":"data_stats","parameters":{{"group_by":"{example_categorical}","target_col":"{example_numeric}","agg_type":"AVG","format":"chart"}}}}
 """
     return prompt
 
@@ -883,8 +842,13 @@ async def chat_endpoint(request: ChatRequest):
 
     system_prompt = build_dynamic_system_prompt()
 
-    messages = [SystemMessage(content=system_prompt),
-                HumanMessage(content=request.message)]
+    messages = [SystemMessage(content=system_prompt)]
+    for h in (request.history or [])[-6:]:
+        if h.role == "user":
+            messages.append(HumanMessage(content=h.content))
+        else:
+            messages.append(AIMessage(content=h.content if isinstance(h.content, str) else "[chart]"))
+    messages.append(HumanMessage(content=request.message))
 
     try:
         raw = str(model.invoke(messages).content).strip()
